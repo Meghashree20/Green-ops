@@ -103,6 +103,51 @@ export async function listResourceRecords(
   return result
 }
 
+export async function listResourceRecordsForAnalysis(
+  query: Omit<ResourceQuery, 'page' | 'page_size'>,
+  signal?: AbortSignal,
+): Promise<ResourceRecord[]> {
+  const pageSize = 100
+  const maxRecords = 10_000
+  const firstPage = await listResourceRecords(
+    { ...query, page: 1, page_size: pageSize },
+    signal,
+  )
+
+  if (firstPage.total > maxRecords) {
+    throw new Error(
+      `The selected period contains ${firstPage.total.toLocaleString()} records. Narrow the period to 10,000 records or fewer before processing.`,
+    )
+  }
+  if (firstPage.records.length !== Math.min(pageSize, firstPage.total)) {
+    throw new Error('The resource list returned inconsistent pagination data. Retry the analysis.')
+  }
+
+  const records = [...firstPage.records]
+  const pageCount = Math.ceil(firstPage.total / pageSize)
+  for (let page = 2; page <= pageCount; page += 1) {
+    const result = await listResourceRecords(
+      { ...query, page, page_size: pageSize },
+      signal,
+    )
+    const expectedPageCount = Math.min(pageSize, firstPage.total - records.length)
+    if (result.total !== firstPage.total || result.records.length !== expectedPageCount) {
+      throw new Error(
+        'The resource list changed while pages were loading. Retry the analysis to avoid incomplete results.',
+      )
+    }
+    records.push(...result.records)
+  }
+
+  if (records.length !== firstPage.total) {
+    throw new Error(
+      'Not all records for the selected period could be loaded. Retry the analysis.',
+    )
+  }
+
+  return records
+}
+
 export async function createResourceRecord(
   record: ResourceRecordInput,
 ): Promise<ResourceRecord> {
@@ -127,10 +172,12 @@ export async function uploadResourceCsv(file: File): Promise<CsvUploadSummary> {
 
 export async function analyzeResourceRecords(
   request: AnalyzeRequest,
+  signal?: AbortSignal,
 ): Promise<AnalyticsResult> {
   const result = await apiFetch<AnalyticsResult>('/api/v1/analytics/analyze', {
     method: 'POST',
     body: JSON.stringify(request),
+    signal,
   })
   if (!result) throw new Error('The analytics endpoint returned an empty response.')
   return result
@@ -149,12 +196,14 @@ export async function estimateWorkload(
 
 export async function evaluateWorkload(
   request: RecommendationRequest,
+  signal?: AbortSignal,
 ): Promise<RecommendationResponse> {
   const result = await apiFetch<RecommendationResponse>(
     '/api/v1/recommendations/evaluate',
     {
       method: 'POST',
       body: JSON.stringify(request),
+      signal,
     },
   )
   if (!result) throw new Error('The recommendation endpoint returned an empty response.')

@@ -7,6 +7,7 @@ import {
   estimateWorkload,
   getHealth,
   listResourceRecords,
+  listResourceRecordsForAnalysis,
   uploadResourceCsv,
 } from './api'
 import { jsonResponse } from '../test/setup'
@@ -50,6 +51,97 @@ describe('shared API client', () => {
 
     expect(fetchMock.mock.calls[0][0]).toBe(
       'http://127.0.0.1:8000/api/v1/resources?page=2&page_size=10&from_dt=2026-10-01T00%3A00%3A00Z&to_dt=2026-10-02T00%3A00%3A00Z',
+    )
+  })
+
+  it('loads every resource page for analytics with the selected date filters', async () => {
+    fetchMock.mockImplementation(async (input) => {
+      const url = new URL(String(input))
+      const page = Number(url.searchParams.get('page'))
+      const record = (index: number) => ({
+        id: `id-${index}`,
+        created_at: '2026-10-01T00:00:00Z',
+        workload_id: `job-${index}`,
+        timestamp: '2026-10-01T00:00:00Z',
+        cpu_utilization: 20,
+        memory_utilization: 25,
+        duration_seconds: 10,
+        latency_p99_ms: null,
+      })
+      return jsonResponse({
+        total: 101,
+        page,
+        page_size: 100,
+        records: page === 1
+          ? Array.from({ length: 100 }, (_, index) => record(index))
+          : [record(100)],
+      })
+    })
+
+    const records = await listResourceRecordsForAnalysis({
+      from_dt: '2026-10-01T00:00:00Z',
+      to_dt: '2026-10-02T00:00:00Z',
+    })
+
+    expect(records).toHaveLength(101)
+    expect(records[0]?.workload_id).toBe('job-0')
+    expect(records[100]?.workload_id).toBe('job-100')
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+    for (const [input] of fetchMock.mock.calls) {
+      const url = new URL(String(input))
+      expect(url.searchParams.get('page_size')).toBe('100')
+      expect(url.searchParams.get('from_dt')).toBe('2026-10-01T00:00:00Z')
+      expect(url.searchParams.get('to_dt')).toBe('2026-10-02T00:00:00Z')
+    }
+    expect(new URL(String(fetchMock.mock.calls[0]?.[0])).searchParams.get('page')).toBe('1')
+    expect(new URL(String(fetchMock.mock.calls[1]?.[0])).searchParams.get('page')).toBe('2')
+  })
+
+  it('rejects analytics periods larger than the backend request limit', async () => {
+    fetchMock.mockImplementation(async () => jsonResponse({
+      total: 10_001,
+      page: 1,
+      page_size: 100,
+      records: Array.from({ length: 100 }, (_, index) => ({
+        id: `id-${index}`,
+        created_at: '2026-10-01T00:00:00Z',
+        workload_id: `job-${index}`,
+        timestamp: '2026-10-01T00:00:00Z',
+        cpu_utilization: 20,
+        memory_utilization: 25,
+        duration_seconds: 10,
+        latency_p99_ms: null,
+      })),
+    }))
+
+    await expect(listResourceRecordsForAnalysis({})).rejects.toThrow(
+      'The selected period contains 10,001 records. Narrow the period to 10,000 records or fewer',
+    )
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+  })
+
+  it('rejects changed page totals instead of returning incomplete analytics data', async () => {
+    fetchMock.mockImplementation(async (input) => {
+      const page = Number(new URL(String(input)).searchParams.get('page'))
+      return jsonResponse({
+        total: page === 1 ? 101 : 102,
+        page,
+        page_size: 100,
+        records: Array.from({ length: 100 }, (_, index) => ({
+          id: `id-${index}`,
+          created_at: '2026-10-01T00:00:00Z',
+          workload_id: `job-${index}`,
+          timestamp: '2026-10-01T00:00:00Z',
+          cpu_utilization: 20,
+          memory_utilization: 25,
+          duration_seconds: 10,
+          latency_p99_ms: null,
+        })),
+      })
+    })
+
+    await expect(listResourceRecordsForAnalysis({})).rejects.toThrow(
+      'The resource list changed while pages were loading.',
     )
   })
 

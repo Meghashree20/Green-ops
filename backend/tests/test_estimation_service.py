@@ -76,6 +76,11 @@ def test_zero_cpu_produces_zero_energy_and_carbon():
     assert result.estimated_workload_cost_usd == pytest.approx(0.0)
     assert result.estimated_energy_kwh == pytest.approx(0.0)
     assert result.estimated_carbon_kg_co2e == pytest.approx(0.0)
+    assert any(
+        "assumes zero power at 0% CPU" in warning
+        and "no PUE adjustment is applied" in warning
+        for warning in result.warnings
+    )
 
 
 def test_workload_cost_none_when_cpu_absent():
@@ -86,7 +91,7 @@ def test_workload_cost_none_when_cpu_absent():
 # ── Energy ────────────────────────────────────────────────────────────────────
 
 def test_energy_formula_correct():
-    # TDP=200W, CPU=50%, duration=3600s → power=100W → 0.1 kWh
+    # Existing proxy: TDP=200W, CPU=50%, duration=3600s → 100W proxy → 0.1 kWh.
     result = estimate(_req(
         server_tdp_watts=200.0,
         cpu_utilization_pct=50.0,
@@ -141,6 +146,73 @@ def test_carbon_formula_correct():
         duration_seconds=3600.0,
     ))
     assert result.estimated_carbon_kg_co2e == pytest.approx(0.05, rel=1e-5)
+
+
+def test_emissions_factor_provenance_is_echoed_without_changing_carbon_formula():
+    result = estimate(_req(
+        server_tdp_watts=200.0,
+        cpu_utilization_pct=50.0,
+        emissions_factor_kg_co2_per_kwh=0.5,
+        emissions_factor_source="Grid data report",
+        emissions_factor_region="Region X",
+        emissions_factor_reference_period="2025",
+        duration_seconds=3600.0,
+    ))
+
+    assert result.estimated_energy_kwh == pytest.approx(0.1)
+    assert result.estimated_carbon_kg_co2e == pytest.approx(0.05)
+    assert result.assumptions.emissions_factor_kg_co2_per_kwh == pytest.approx(0.5)
+    assert result.assumptions.emissions_factor_source == "Grid data report"
+    assert result.assumptions.emissions_factor_region == "Region X"
+    assert result.assumptions.emissions_factor_reference_period == "2025"
+    assert any(
+        "user-supplied and has not been independently verified" in warning
+        for warning in result.warnings
+    )
+    assert not any("provenance unspecified" in warning for warning in result.warnings)
+
+
+def test_missing_emissions_factor_provenance_remains_unspecified():
+    result = estimate(_req(
+        server_tdp_watts=200.0,
+        cpu_utilization_pct=50.0,
+        emissions_factor_kg_co2_per_kwh=0.5,
+    ))
+
+    assert result.estimated_carbon_kg_co2e == pytest.approx(0.05)
+    assert result.assumptions.emissions_factor_source is None
+    assert result.assumptions.emissions_factor_region is None
+    assert result.assumptions.emissions_factor_reference_period is None
+    assert any(
+        "provenance unspecified: source, geographic region, reference year or period"
+        in warning
+        for warning in result.warnings
+    )
+
+
+def test_blank_emissions_factor_provenance_is_normalized_to_unspecified():
+    request = _req(
+        emissions_factor_source="  ",
+        emissions_factor_region=" \t",
+        emissions_factor_reference_period="",
+    )
+
+    assert request.emissions_factor_source is None
+    assert request.emissions_factor_region is None
+    assert request.emissions_factor_reference_period is None
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("emissions_factor_source", "s" * 201),
+        ("emissions_factor_region", "r" * 129),
+        ("emissions_factor_reference_period", "p" * 101),
+    ],
+)
+def test_emissions_factor_provenance_length_limits(field, value):
+    with pytest.raises(ValidationError):
+        _req(**{field: value})
 
 
 def test_carbon_none_when_energy_none():
@@ -224,7 +296,12 @@ def test_warnings_present_when_energy_estimated():
         cpu_utilization_pct=50.0,
         emissions_factor_kg_co2_per_kwh=0.3,
     ))
-    assert any("TDP" in w for w in result.warnings)
+    energy_warning = next(w for w in result.warnings if "estimated_energy_kwh" in w)
+    assert "illustrative, uncalibrated" in energy_warning
+    assert "not measured server power" in energy_warning
+    assert "underestimate or overestimate" in energy_warning
+    assert "assumes zero power at 0% CPU" in energy_warning
+    assert "no PUE adjustment is applied" in energy_warning
     assert any("grid-average" in w for w in result.warnings)
 
 

@@ -1,6 +1,7 @@
 import {
   AlertCircle,
   BadgeDollarSign,
+  CalendarDays,
   CheckCircle2,
   Clock3,
   Factory,
@@ -11,12 +12,18 @@ import {
   Server,
   Zap,
 } from 'lucide-react'
-import { useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import type { FormEvent } from 'react'
 import type { LucideIcon } from 'lucide-react'
 import { DashboardPanel } from '../components/dashboard/DashboardPanel'
-import { ApiError, estimateWorkload } from '../services/api'
+import { ApiError, estimateWorkload, listResourceRecordsForAnalysis } from '../services/api'
 import type { EstimationRequest, EstimationResult } from '../types/estimation'
+import type { ResourceRecord } from '../types/resource'
+
+interface ReportingPeriod {
+  from_dt: string
+  to_dt: string
+}
 
 interface EstimationFormValues {
   workload_id: string
@@ -25,6 +32,9 @@ interface EstimationFormValues {
   cpu_utilization_pct: string
   server_tdp_watts: string
   emissions_factor_kg_co2_per_kwh: string
+  emissions_factor_source: string
+  emissions_factor_region: string
+  emissions_factor_reference_period: string
 }
 
 const emptyForm: EstimationFormValues = {
@@ -34,6 +44,33 @@ const emptyForm: EstimationFormValues = {
   cpu_utilization_pct: '',
   server_tdp_watts: '',
   emissions_factor_kg_co2_per_kwh: '',
+  emissions_factor_source: '',
+  emissions_factor_region: '',
+  emissions_factor_reference_period: '',
+}
+
+function toDateTimeLocalValue(date: Date): string {
+  return new Date(date.getTime() - date.getTimezoneOffset() * 60_000)
+    .toISOString()
+    .slice(0, 16)
+}
+
+function defaultReportingPeriod(): ReportingPeriod {
+  const to = new Date()
+  const from = new Date(to.getTime() - 7 * 24 * 60 * 60 * 1000)
+  return {
+    from_dt: toDateTimeLocalValue(from),
+    to_dt: toDateTimeLocalValue(to),
+  }
+}
+
+function formatRecordTimestamp(timestamp: string): string {
+  const date = new Date(timestamp)
+  if (Number.isNaN(date.getTime())) return timestamp
+  return new Intl.DateTimeFormat(undefined, {
+    dateStyle: 'medium',
+    timeStyle: 'short',
+  }).format(date)
 }
 
 function getApiErrorMessage(error: unknown): string {
@@ -113,17 +150,107 @@ function AssumptionValue({ value, unit }: { value: number | null; unit: string }
   return <span className="font-medium text-slate-900">{formatNumber(value)} {unit}</span>
 }
 
+function ProvenanceValue({ value }: { value: string | null | undefined }) {
+  if (!value?.trim()) return <span className="text-slate-400">Unspecified</span>
+  return <span className="font-medium text-slate-900">{value}</span>
+}
+
 export function CostCarbonPage() {
   const [values, setValues] = useState(emptyForm)
+  const [period, setPeriod] = useState(defaultReportingPeriod)
+  const [records, setRecords] = useState<ResourceRecord[]>([])
+  const [selectedRecordId, setSelectedRecordId] = useState('')
+  const [recordsLoaded, setRecordsLoaded] = useState(false)
+  const [recordsError, setRecordsError] = useState<string | null>(null)
+  const [recordsLoading, setRecordsLoading] = useState(false)
   const [fieldErrors, setFieldErrors] = useState<string[]>([])
   const [result, setResult] = useState<EstimationResult | null>(null)
   const [apiError, setApiError] = useState<string | null>(null)
   const [submitting, setSubmitting] = useState(false)
   const [lastRequest, setLastRequest] = useState<EstimationRequest | null>(null)
+  const [lastRecordQuery, setLastRecordQuery] = useState<ReportingPeriod | null>(null)
+  const recordsController = useRef<AbortController | null>(null)
+
+  useEffect(() => () => recordsController.current?.abort(), [])
 
   const updateValue = (field: keyof EstimationFormValues, value: string) => {
     setValues((current) => ({ ...current, [field]: value }))
     setFieldErrors([])
+    setApiError(null)
+  }
+
+  const loadRecords = async (selectedPeriod: ReportingPeriod) => {
+    recordsController.current?.abort()
+    const controller = new AbortController()
+    recordsController.current = controller
+    setRecordsLoading(true)
+    setRecordsError(null)
+    setRecords([])
+    setRecordsLoaded(false)
+    setSelectedRecordId('')
+    setLastRecordQuery(selectedPeriod)
+    setValues((current) => ({
+      ...current,
+      workload_id: '',
+      duration_seconds: '',
+      cpu_utilization_pct: '',
+    }))
+    setResult(null)
+    setApiError(null)
+
+    try {
+      const loadedRecords = await listResourceRecordsForAnalysis(
+        selectedPeriod,
+        controller.signal,
+      )
+      if (!controller.signal.aborted) {
+        setRecords(loadedRecords)
+        setRecordsLoaded(true)
+      }
+    } catch (error) {
+      if (!controller.signal.aborted) setRecordsError(getApiErrorMessage(error))
+    } finally {
+      if (!controller.signal.aborted) {
+        recordsController.current = null
+        setRecordsLoading(false)
+      }
+    }
+  }
+
+  const updateReportingPeriod = (field: keyof ReportingPeriod, value: string) => {
+    recordsController.current?.abort()
+    recordsController.current = null
+    setPeriod((current) => ({ ...current, [field]: value }))
+    setRecords([])
+    setRecordsLoaded(false)
+    setRecordsLoading(false)
+    setRecordsError(null)
+    setSelectedRecordId('')
+    setLastRecordQuery(null)
+    setValues((current) => ({
+      ...current,
+      workload_id: '',
+      duration_seconds: '',
+      cpu_utilization_pct: '',
+    }))
+    setFieldErrors([])
+    setResult(null)
+    setApiError(null)
+  }
+
+  const selectRecord = (recordId: string) => {
+    setSelectedRecordId(recordId)
+    const selectedRecord = records.find((record) => record.id === recordId)
+    if (!selectedRecord) return
+
+    setValues((current) => ({
+      ...current,
+      workload_id: selectedRecord.workload_id,
+      duration_seconds: String(selectedRecord.duration_seconds),
+      cpu_utilization_pct: String(selectedRecord.cpu_utilization),
+    }))
+    setFieldErrors([])
+    setResult(null)
     setApiError(null)
   }
 
@@ -181,6 +308,27 @@ export function CostCarbonPage() {
     if (emissionsFactor !== null) {
       request.emissions_factor_kg_co2_per_kwh = emissionsFactor
     }
+    const provenanceFields = [
+      ['emissions_factor_source', values.emissions_factor_source, 200, 'Emission factor source'],
+      ['emissions_factor_region', values.emissions_factor_region, 128, 'Emission factor region'],
+      [
+        'emissions_factor_reference_period',
+        values.emissions_factor_reference_period,
+        100,
+        'Emission factor reference period',
+      ],
+    ] as const
+    for (const [key, value, maxLength, label] of provenanceFields) {
+      const normalized = value.trim()
+      if (normalized.length > maxLength) {
+        errors.push(`${label} must be ${maxLength} characters or fewer.`)
+      }
+      if (normalized) request[key] = normalized
+    }
+    if (errors.length > 0) {
+      setFieldErrors(errors)
+      return null
+    }
     return request
   }
 
@@ -230,13 +378,140 @@ export function CostCarbonPage() {
             <h3 className="text-sm font-semibold text-amber-950">Estimates, not measurements</h3>
             <p className="mt-1 text-xs leading-5 text-amber-900">
               CPU utilization is an optional measured input. It does not directly measure
-              electricity use. When combined with server TDP, the backend uses CPU% as a
-              power proxy; actual energy depends on hardware, memory, idle draw, and data
-              centre PUE.
+              electricity use. When combined with server TDP, the backend estimates energy
+              with an illustrative, uncalibrated CPU-scaled TDP proxy—not measured server
+              power or a calibrated model of actual power. It may under- or overestimate
+              energy and assumes zero power at 0% CPU, although a running server uses idle
+              power. Idle draw and other hardware loads are omitted. PUE is not applied.
             </p>
           </div>
         </div>
       </div>
+
+      <section className="rounded-xl border border-[var(--color-border)] bg-white shadow-[0_1px_2px_rgba(15,23,42,0.03)]">
+        <div className="flex items-start gap-3 border-b border-[var(--color-border-soft)] px-5 py-4 sm:px-6">
+          <span className="mt-0.5 flex size-9 shrink-0 items-center justify-center rounded-lg bg-emerald-50 text-emerald-800">
+            <Server size={18} aria-hidden="true" />
+          </span>
+          <div>
+            <h3 className="text-sm font-semibold text-slate-900">Select stored workload data</h3>
+            <p className="mt-1 text-xs leading-5 text-slate-500">
+              Load observations from MongoDB for a reporting period. Selecting a record
+              fills its observed workload ID, duration, and CPU utilization only.
+            </p>
+          </div>
+        </div>
+        <div className="space-y-4 p-5 sm:p-6">
+          <div className="grid gap-4 sm:grid-cols-2">
+            <label htmlFor="estimation-from-dt" className="text-sm font-medium text-slate-700">
+              From date and time
+              <input
+                id="estimation-from-dt"
+                type="datetime-local"
+                value={period.from_dt}
+                onChange={(event) => updateReportingPeriod('from_dt', event.target.value)}
+                disabled={recordsLoading}
+                className="mt-1.5 block min-h-11 w-full rounded-lg border border-slate-300 bg-white px-3 py-2.5 text-sm text-slate-900 shadow-sm outline-none focus:border-emerald-700 focus:ring-2 focus:ring-emerald-700/15 disabled:bg-slate-50"
+              />
+            </label>
+            <label htmlFor="estimation-to-dt" className="text-sm font-medium text-slate-700">
+              To date and time
+              <input
+                id="estimation-to-dt"
+                type="datetime-local"
+                value={period.to_dt}
+                onChange={(event) => updateReportingPeriod('to_dt', event.target.value)}
+                disabled={recordsLoading}
+                className="mt-1.5 block min-h-11 w-full rounded-lg border border-slate-300 bg-white px-3 py-2.5 text-sm text-slate-900 shadow-sm outline-none focus:border-emerald-700 focus:ring-2 focus:ring-emerald-700/15 disabled:bg-slate-50"
+              />
+            </label>
+          </div>
+          <p className="text-xs leading-5 text-slate-500">
+            The default range is the previous seven days. All matching 100-record pages
+            are loaded; periods over 10,000 records must be narrowed.
+          </p>
+          {recordsError && (
+            <div className="flex flex-col gap-3 rounded-lg border border-rose-200 bg-rose-50 p-4 sm:flex-row sm:items-center sm:justify-between" role="alert">
+              <p className="text-sm text-rose-900">{recordsError}</p>
+              <button
+                type="button"
+                disabled={recordsLoading}
+                onClick={() => {
+                  if (lastRecordQuery) void loadRecords(lastRecordQuery)
+                }}
+                className="inline-flex w-fit items-center gap-2 rounded-md border border-rose-200 bg-white px-3 py-2 text-sm font-medium text-rose-900 hover:bg-rose-100 disabled:opacity-60"
+              >
+                <RefreshCw size={15} aria-hidden="true" />
+                Retry loading records
+              </button>
+            </div>
+          )}
+          <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+            <p className="text-xs text-slate-500" aria-live="polite">
+              {recordsLoading
+                ? 'Loading stored resource records…'
+                : recordsLoaded && records.length > 0
+                  ? `${records.length.toLocaleString()} records loaded for this period.`
+                  : 'Load records to select a stored workload observation.'}
+            </p>
+            <button
+              type="button"
+              disabled={recordsLoading}
+              onClick={() => {
+                const from = new Date(period.from_dt)
+                const to = new Date(period.to_dt)
+                if (!period.from_dt || !Number.isFinite(from.getTime()) ||
+                  !period.to_dt || !Number.isFinite(to.getTime())) {
+                  setLastRecordQuery(null)
+                  setRecordsError('Choose a valid start and end date/time.')
+                  return
+                }
+                if (from.getTime() > to.getTime()) {
+                  setLastRecordQuery(null)
+                  setRecordsError('The start date and time must not be later than the end date and time.')
+                  return
+                }
+                void loadRecords({
+                  from_dt: from.toISOString(),
+                  to_dt: to.toISOString(),
+                })
+              }}
+              className="inline-flex min-h-10 items-center justify-center gap-2 rounded-lg border border-emerald-800 bg-white px-4 py-2 text-sm font-semibold text-emerald-900 hover:bg-emerald-50 disabled:cursor-not-allowed disabled:opacity-60"
+            >
+              {recordsLoading ? (
+                <LoaderCircle size={16} className="animate-spin" aria-hidden="true" />
+              ) : (
+                <CalendarDays size={16} aria-hidden="true" />
+              )}
+              {recordsLoading ? 'Loading records…' : 'Load stored records'}
+            </button>
+          </div>
+          {recordsLoaded && records.length === 0 && !recordsLoading && !recordsError && (
+            <p className="rounded-lg border border-dashed border-slate-300 bg-slate-50 px-4 py-3 text-sm text-slate-600" role="status">
+              No stored records match this period. Adjust the dates or enter workload data manually.
+            </p>
+          )}
+          {records.length > 0 && (
+            <label htmlFor="stored-resource-record" className="block text-sm font-medium text-slate-700">
+              Stored resource record
+              <select
+                id="stored-resource-record"
+                value={selectedRecordId}
+                onChange={(event) => selectRecord(event.target.value)}
+                disabled={recordsLoading}
+                className="mt-1.5 block min-h-11 w-full rounded-lg border border-slate-300 bg-white px-3 py-2.5 text-sm text-slate-900 shadow-sm outline-none focus:border-emerald-700 focus:ring-2 focus:ring-emerald-700/15 disabled:bg-slate-50"
+              >
+                <option value="">Choose a stored observation</option>
+                {records.map((record) => (
+                  <option key={record.id} value={record.id}>
+                    {record.workload_id} · {formatRecordTimestamp(record.timestamp)} · CPU {record.cpu_utilization}% · {record.duration_seconds}s
+                  </option>
+                ))}
+              </select>
+            </label>
+          )}
+        </div>
+      </section>
 
       <section className="rounded-xl border border-[var(--color-border)] bg-white shadow-[0_1px_2px_rgba(15,23,42,0.03)]">
         <div className="flex items-start gap-3 border-b border-[var(--color-border-soft)] px-5 py-4 sm:px-6">
@@ -254,6 +529,10 @@ export function CostCarbonPage() {
         <form className="space-y-6 p-5 sm:p-6" onSubmit={submit} noValidate>
           <fieldset disabled={submitting} className="space-y-5">
             <legend className="sr-only">Workload and estimate assumptions</legend>
+            <p className="text-xs leading-5 text-slate-600">
+              Workload ID, duration, and CPU can be prefilled from the selected stored observation.
+              Instance price, server TDP, and emissions factor are assumptions that you supply.
+            </p>
             <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
               <label className="text-sm font-medium text-slate-700">
                 Workload ID <span className="text-rose-700" aria-label="required">*</span>
@@ -310,7 +589,7 @@ export function CostCarbonPage() {
               </label>
 
               <label className="text-sm font-medium text-slate-700">
-                Average CPU utilization (%)
+                Observed CPU utilization (%)
                 <input
                   className={inputClass}
                   name="cpu_utilization_pct"
@@ -357,9 +636,44 @@ export function CostCarbonPage() {
                   placeholder="Optional, greater than 0"
                 />
                 <span className="mt-1 block text-xs font-normal text-slate-500">
-                  Supply a documented factor for the data-centre region and reporting period.
-                  GreenOps does not verify the source or retain factor provenance.
+                  Enter the factor from a source you choose. GreenOps does not select or verify its value.
                 </span>
+              </label>
+              <label className="text-sm font-medium text-slate-700">
+                Emissions factor source or reference
+                <input
+                  className={inputClass}
+                  name="emissions_factor_source"
+                  value={values.emissions_factor_source}
+                  onChange={(event) => updateValue('emissions_factor_source', event.target.value)}
+                  maxLength={200}
+                  autoComplete="off"
+                  placeholder="Optional reference name"
+                />
+              </label>
+              <label className="text-sm font-medium text-slate-700">
+                Emissions factor geographic region
+                <input
+                  className={inputClass}
+                  name="emissions_factor_region"
+                  value={values.emissions_factor_region}
+                  onChange={(event) => updateValue('emissions_factor_region', event.target.value)}
+                  maxLength={128}
+                  autoComplete="off"
+                  placeholder="Optional region"
+                />
+              </label>
+              <label className="text-sm font-medium text-slate-700">
+                Emissions factor reference year or period
+                <input
+                  className={inputClass}
+                  name="emissions_factor_reference_period"
+                  value={values.emissions_factor_reference_period}
+                  onChange={(event) => updateValue('emissions_factor_reference_period', event.target.value)}
+                  maxLength={100}
+                  autoComplete="off"
+                  placeholder="Optional year or period"
+                />
               </label>
             </div>
           </fieldset>
@@ -455,7 +769,7 @@ export function CostCarbonPage() {
               value={result.estimated_energy_kwh}
               unit="kWh"
               icon={Zap}
-              description="TDP × CPU%-based proxy; not a direct power measurement."
+              description="Illustrative, uncalibrated TDP × CPU% proxy—not measured power; assumes zero at 0% CPU. PUE not applied."
             />
             <EstimateCard
               title="Carbon emissions"
@@ -493,9 +807,25 @@ export function CostCarbonPage() {
                 <dt className="text-sm text-slate-600">Server TDP</dt>
                 <dd><AssumptionValue value={result.assumptions.server_tdp_watts} unit="W" /></dd>
               </div>
-              <div className="flex items-center justify-between gap-3 py-3.5 sm:col-span-2">
-                <dt className="text-sm text-slate-600">Grid emissions factor</dt>
+              <div className="flex items-center justify-between gap-3 border-b border-slate-100 py-3.5 sm:col-span-2">
+                <dt className="text-sm text-slate-600">User-supplied grid emissions factor</dt>
                 <dd><AssumptionValue value={result.assumptions.emissions_factor_kg_co2_per_kwh} unit="kg CO₂e/kWh" /></dd>
+              </div>
+              <div className="flex items-center justify-between gap-3 border-b border-slate-100 py-3.5 sm:col-span-2">
+                <dt className="text-sm text-slate-600">Factor source or reference</dt>
+                <dd><ProvenanceValue value={result.assumptions.emissions_factor_source} /></dd>
+              </div>
+              <div className="flex items-center justify-between gap-3 border-b border-slate-100 py-3.5 sm:col-span-2">
+                <dt className="text-sm text-slate-600">Factor geographic region</dt>
+                <dd><ProvenanceValue value={result.assumptions.emissions_factor_region} /></dd>
+              </div>
+              <div className="flex items-center justify-between gap-3 py-3.5 sm:col-span-2">
+                <dt className="text-sm text-slate-600">Factor reference year or period</dt>
+                <dd><ProvenanceValue value={result.assumptions.emissions_factor_reference_period} /></dd>
+              </div>
+              <div className="py-3 text-xs leading-5 text-slate-500 sm:col-span-2">
+                Emissions-factor provenance is user-supplied metadata and is not independently verified.
+                Unspecified fields do not establish the factor&apos;s source, region, or reference period.
               </div>
             </dl>
           </DashboardPanel>

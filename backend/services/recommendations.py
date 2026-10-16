@@ -67,7 +67,11 @@ def evaluate_recommendations(request: RecommendationRequest) -> RecommendationRe
 
     # Latency inspection
     has_latency = df["latency_p99_ms"].notna().any()
+    missing_latency_count = int(df["latency_p99_ms"].isna().sum())
     max_latency = float(df["latency_p99_ms"].dropna().max()) if has_latency else None
+    latency_evidence_incomplete = (
+        constraints.max_latency_p99_ms is not None and missing_latency_count > 0
+    )
 
     latency_violations = 0
     if constraints.max_latency_p99_ms is not None and has_latency:
@@ -89,6 +93,12 @@ def evaluate_recommendations(request: RecommendationRequest) -> RecommendationRe
     warnings: list[str] = [
         "Advisory only. Recommendations must be evaluated against business SLAs before applying.",
     ]
+    if latency_evidence_incomplete:
+        warnings.append(
+            "Latency compliance cannot be determined: P99 latency is missing for "
+            f"{missing_latency_count} of {sample_count} observations despite a maximum "
+            "latency constraint. Missing measurements are not counted as compliant."
+        )
     verification_conditions: list[str] = [
         "Verify downstream batch schedules or impending cyclical traffic surges.",
         "Check that testing in a staging environment preserves target SLAs.",
@@ -138,6 +148,32 @@ def evaluate_recommendations(request: RecommendationRequest) -> RecommendationRe
                 warnings=warnings + ["Risk of throttling or out-of-memory errors under peak demand."],
                 verification_conditions=verification_conditions + [
                     "Evaluate whether horizontal scaling or vertical sizing is preferred.",
+                ],
+            ),
+        )
+
+    if (
+        latency_evidence_incomplete
+        and cpu_p95 < 35.0
+        and mem_peak < 50.0
+        and latency_violations == 0
+    ):
+        return RecommendationResponse(
+            workload_id=workload_id,
+            recommendation=RecommendationItem(
+                category=RecommendationCategory.MAINTAIN,
+                sufficiency_status=SufficiencyStatus.MARGINAL,
+                confidence=ConfidenceLevel.LOW,
+                reason=(
+                    "CPU and memory utilization are low, but the configured latency "
+                    "constraint cannot be evaluated from incomplete latency measurements. "
+                    "Maintain the current configuration until representative latency "
+                    "observations are available."
+                ),
+                evidence=evidence,
+                warnings=warnings,
+                verification_conditions=verification_conditions + [
+                    "Collect P99 latency observations for the workload and evaluate them against the configured constraint.",
                 ],
             ),
         )

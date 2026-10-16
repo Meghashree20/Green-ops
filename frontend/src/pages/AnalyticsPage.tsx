@@ -2,6 +2,7 @@ import {
   Activity,
   AlertCircle,
   BarChart3,
+  CalendarDays,
   CheckCircle2,
   Cpu,
   Database,
@@ -11,10 +12,14 @@ import {
   RefreshCw,
   ShieldAlert,
 } from 'lucide-react'
-import { lazy, Suspense, useState } from 'react'
+import { lazy, Suspense, useEffect, useRef, useState } from 'react'
 import type { LucideIcon } from 'lucide-react'
 import { DashboardPanel } from '../components/dashboard/DashboardPanel'
-import { analyzeResourceRecords, ApiError } from '../services/api'
+import {
+  analyzeResourceRecords,
+  ApiError,
+  listResourceRecordsForAnalysis,
+} from '../services/api'
 import type { AnalyticsResult, AnalyzeRequest } from '../types/analytics'
 import type { ResourceRecordInput } from '../types/resource'
 
@@ -28,66 +33,24 @@ function isObject(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
 
-function validateRecords(value: unknown): string[] {
-  if (!Array.isArray(value)) return ['The JSON value must be an array of records.']
-  if (value.length < 1) return ['Provide at least one resource record.']
+interface ReportingPeriod {
+  from_dt: string
+  to_dt: string
+}
 
-  const errors: string[] = []
-  value.forEach((record, index) => {
-    const prefix = `Record ${index + 1}`
-    if (!isObject(record)) {
-      errors.push(`${prefix} must be a JSON object.`)
-      return
-    }
+function toDateTimeLocalValue(date: Date): string {
+  return new Date(date.getTime() - date.getTimezoneOffset() * 60_000)
+    .toISOString()
+    .slice(0, 16)
+}
 
-    if (
-      typeof record.workload_id !== 'string' ||
-      record.workload_id.trim().length < 1 ||
-      record.workload_id.trim().length > 128
-    ) {
-      errors.push(`${prefix}: workload_id must be a nonblank string of at most 128 characters.`)
-    }
-
-    if (
-      typeof record.timestamp !== 'string' ||
-      record.timestamp.trim() === '' ||
-      !Number.isFinite(Date.parse(record.timestamp))
-    ) {
-      errors.push(`${prefix}: timestamp must be a valid ISO-8601 date/time string.`)
-    }
-
-    for (const field of ['cpu_utilization', 'memory_utilization'] as const) {
-      const fieldValue = record[field]
-      if (
-        typeof fieldValue !== 'number' ||
-        !Number.isFinite(fieldValue) ||
-        fieldValue < 0 ||
-        fieldValue > 100
-      ) {
-        errors.push(`${prefix}: ${field} must be a number from 0 to 100.`)
-      }
-    }
-
-    if (
-      typeof record.duration_seconds !== 'number' ||
-      !Number.isFinite(record.duration_seconds) ||
-      record.duration_seconds <= 0
-    ) {
-      errors.push(`${prefix}: duration_seconds must be a number greater than 0.`)
-    }
-
-    if (
-      'latency_p99_ms' in record &&
-      record.latency_p99_ms !== null &&
-      (typeof record.latency_p99_ms !== 'number' ||
-        !Number.isFinite(record.latency_p99_ms) ||
-        record.latency_p99_ms < 0)
-    ) {
-      errors.push(`${prefix}: latency_p99_ms must be null or a number greater than or equal to 0.`)
-    }
-  })
-
-  return errors
+function defaultReportingPeriod(): ReportingPeriod {
+  const to = new Date()
+  const from = new Date(to.getTime() - 7 * 24 * 60 * 60 * 1000)
+  return {
+    from_dt: toDateTimeLocalValue(from),
+    to_dt: toDateTimeLocalValue(to),
+  }
 }
 
 function getApiErrorMessage(error: unknown): string {
@@ -144,25 +107,56 @@ function MetricCard({
 }
 
 export function AnalyticsPage() {
-  const [recordsJson, setRecordsJson] = useState('')
+  const [period, setPeriod] = useState(defaultReportingPeriod)
   const [validationErrors, setValidationErrors] = useState<string[]>([])
   const [result, setResult] = useState<AnalyticsResult | null>(null)
+  const [noRecords, setNoRecords] = useState(false)
   const [apiError, setApiError] = useState<string | null>(null)
   const [submitting, setSubmitting] = useState(false)
-  const [lastRequest, setLastRequest] = useState<AnalyzeRequest | null>(null)
+  const [lastPeriod, setLastPeriod] = useState<ReportingPeriod | null>(null)
+  const activeRequest = useRef<AbortController | null>(null)
 
-  const analyze = async (request: AnalyzeRequest) => {
+  useEffect(() => () => activeRequest.current?.abort(), [])
+
+  const analyze = async (selectedPeriod: ReportingPeriod) => {
+    activeRequest.current?.abort()
+    const controller = new AbortController()
+    activeRequest.current = controller
     setSubmitting(true)
     setApiError(null)
     setResult(null)
-    setLastRequest(request)
+    setNoRecords(false)
+    setLastPeriod(selectedPeriod)
     try {
-      const response = await analyzeResourceRecords(request)
-      setResult(response)
+      const storedRecords = await listResourceRecordsForAnalysis(
+        selectedPeriod,
+        controller.signal,
+      )
+      if (controller.signal.aborted) return
+      if (storedRecords.length === 0) {
+        setNoRecords(true)
+        return
+      }
+
+      const request: AnalyzeRequest = {
+        records: storedRecords.map((record): ResourceRecordInput => ({
+          workload_id: record.workload_id,
+          timestamp: record.timestamp,
+          cpu_utilization: record.cpu_utilization,
+          memory_utilization: record.memory_utilization,
+          duration_seconds: record.duration_seconds,
+          latency_p99_ms: record.latency_p99_ms,
+        })),
+      }
+      const response = await analyzeResourceRecords(request, controller.signal)
+      if (!controller.signal.aborted) setResult(response)
     } catch (error) {
-      setApiError(getApiErrorMessage(error))
+      if (!controller.signal.aborted) setApiError(getApiErrorMessage(error))
     } finally {
-      setSubmitting(false)
+      if (!controller.signal.aborted) {
+        activeRequest.current = null
+        setSubmitting(false)
+      }
     }
   }
 
@@ -170,23 +164,38 @@ export function AnalyticsPage() {
     event.preventDefault()
     setApiError(null)
     setResult(null)
-
-    let parsed: unknown
-    try {
-      parsed = JSON.parse(recordsJson)
-    } catch {
-      setValidationErrors(['Enter valid JSON before running the analysis.'])
-      return
+    setNoRecords(false)
+    const errors: string[] = []
+    const from = new Date(period.from_dt)
+    const to = new Date(period.to_dt)
+    if (!period.from_dt || !Number.isFinite(from.getTime())) {
+      errors.push('Choose a valid start date and time.')
     }
-
-    const errors = validateRecords(parsed)
+    if (!period.to_dt || !Number.isFinite(to.getTime())) {
+      errors.push('Choose a valid end date and time.')
+    }
+    if (
+      Number.isFinite(from.getTime()) &&
+      Number.isFinite(to.getTime()) &&
+      from.getTime() > to.getTime()
+    ) {
+      errors.push('The start date and time must not be later than the end date and time.')
+    }
     setValidationErrors(errors)
-    if (errors.length > 0 || !Array.isArray(parsed)) return
+    if (errors.length > 0) return
 
-    const request: AnalyzeRequest = {
-      records: parsed as ResourceRecordInput[],
-    }
-    await analyze(request)
+    await analyze({
+      from_dt: from.toISOString(),
+      to_dt: to.toISOString(),
+    })
+  }
+
+  const updatePeriod = (field: keyof ReportingPeriod, value: string) => {
+    setPeriod((current) => ({ ...current, [field]: value }))
+    setValidationErrors([])
+    setApiError(null)
+    setResult(null)
+    setNoRecords(false)
   }
 
   return (
@@ -197,8 +206,8 @@ export function AnalyticsPage() {
           Resource analytics
         </h2>
         <p className="mt-2 max-w-3xl text-sm leading-6 text-slate-600">
-          Analyze one or more resource observations. Statistics and trends below are shown
-          only after they are returned by the GreenOps API.
+          Analyze resource observations stored in MongoDB. Statistics and trends are
+          calculated by the GreenOps API from the selected reporting period.
         </p>
       </section>
 
@@ -208,49 +217,49 @@ export function AnalyticsPage() {
             <Database size={18} aria-hidden="true" />
           </span>
           <div>
-            <h3 className="text-sm font-semibold text-slate-900">Analysis input</h3>
+            <h3 className="text-sm font-semibold text-slate-900">Reporting period</h3>
             <p className="mt-1 text-xs leading-5 text-slate-500">
-              Provide a JSON array using the same resource record fields as the API.
-              At least one record is required.
+              Select the observation window to load from stored resource records. The
+              default covers the last seven days; up to 10,000 matching records can be analyzed.
             </p>
           </div>
         </div>
 
-        <form className="space-y-4 p-5 sm:p-6" onSubmit={submit}>
-          <label htmlFor="analytics-records" className="block text-sm font-medium text-slate-700">
-            Resource records (JSON)
-          </label>
-          <textarea
-            id="analytics-records"
-            name="records"
-            value={recordsJson}
-            onChange={(event) => {
-              setRecordsJson(event.target.value)
-              setValidationErrors([])
-              setApiError(null)
-            }}
-            disabled={submitting}
-            required
-            spellCheck={false}
-            autoCapitalize="off"
-            autoCorrect="off"
-            placeholder={'[\n  {\n    "workload_id": "...",\n    "timestamp": "ISO-8601 date/time",\n    "cpu_utilization": 0,\n    "memory_utilization": 0,\n    "duration_seconds": 1,\n    "latency_p99_ms": null\n  }\n]'}
-            className="mt-1.5 min-h-56 w-full resize-y rounded-lg border border-slate-300 bg-slate-50/60 px-4 py-3 font-mono text-xs leading-6 text-slate-800 outline-none placeholder:text-slate-400 focus:border-emerald-700 focus:bg-white focus:ring-2 focus:ring-emerald-700/15 disabled:opacity-60 sm:text-sm"
-            aria-describedby="analytics-input-help"
-            aria-invalid={validationErrors.length > 0}
-          />
-          <div id="analytics-input-help" className="grid gap-2 text-xs leading-5 text-slate-500 sm:grid-cols-2">
-            <p>
-              Required per record: <code>workload_id</code> (nonblank, max 128 chars),
-              {' '}<code>timestamp</code> (ISO-8601), <code>cpu_utilization</code> and
-              {' '}<code>memory_utilization</code> (numbers 0–100), and
-              {' '}<code>duration_seconds</code> (number greater than 0).
-            </p>
-            <p>
-              Optional: <code>latency_p99_ms</code> (null or number ≥ 0). The API
-              treats timestamps without a timezone as UTC.
-            </p>
+        <form className="space-y-4 p-5 sm:p-6" onSubmit={submit} noValidate>
+          <div className="grid gap-4 sm:grid-cols-2">
+            <label htmlFor="analytics-from-dt" className="text-sm font-medium text-slate-700">
+              From date and time
+              <input
+                id="analytics-from-dt"
+                name="from_dt"
+                type="datetime-local"
+                value={period.from_dt}
+                onChange={(event) => updatePeriod('from_dt', event.target.value)}
+                disabled={submitting}
+                required
+                aria-invalid={validationErrors.some((error) => error.includes('start date'))}
+                className="mt-1.5 block min-h-11 w-full rounded-lg border border-slate-300 bg-white px-3 py-2.5 text-sm text-slate-900 shadow-sm outline-none focus:border-emerald-700 focus:ring-2 focus:ring-emerald-700/15 disabled:bg-slate-50"
+              />
+            </label>
+            <label htmlFor="analytics-to-dt" className="text-sm font-medium text-slate-700">
+              To date and time
+              <input
+                id="analytics-to-dt"
+                name="to_dt"
+                type="datetime-local"
+                value={period.to_dt}
+                onChange={(event) => updatePeriod('to_dt', event.target.value)}
+                disabled={submitting}
+                required
+                aria-invalid={validationErrors.some((error) => error.includes('end date'))}
+                className="mt-1.5 block min-h-11 w-full rounded-lg border border-slate-300 bg-white px-3 py-2.5 text-sm text-slate-900 shadow-sm outline-none focus:border-emerald-700 focus:ring-2 focus:ring-emerald-700/15 disabled:bg-slate-50"
+              />
+            </label>
           </div>
+          <p className="text-xs leading-5 text-slate-500">
+            All matching pages are loaded (100 records per page). Periods with more than
+            10,000 records must be narrowed before analysis.
+          </p>
 
           {validationErrors.length > 0 && (
             <div
@@ -273,15 +282,15 @@ export function AnalyticsPage() {
                 <AlertCircle size={18} className="mt-0.5 shrink-0" aria-hidden="true" />
                 <p>{apiError}</p>
               </div>
-              {lastRequest && (
+              {lastPeriod && (
                 <button
                   type="button"
                   disabled={submitting}
-                  onClick={() => void analyze(lastRequest)}
+                  onClick={() => void analyze(lastPeriod)}
                   className="inline-flex w-fit items-center gap-2 rounded-md border border-rose-200 bg-white px-3 py-2 text-sm font-medium text-rose-900 hover:bg-rose-100 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-rose-700 disabled:opacity-60"
                 >
                   <RefreshCw size={15} aria-hidden="true" />
-                  Retry analysis
+                  Retry loading and analysis
                 </button>
               )}
             </div>
@@ -289,11 +298,11 @@ export function AnalyticsPage() {
 
           <div className="flex flex-col gap-3 border-t border-slate-100 pt-4 sm:flex-row sm:items-center sm:justify-between">
             <p className="text-xs text-slate-500">
-              Analysis is calculated by the backend from the records you provide.
+              Analysis is calculated by the backend from the stored records returned for this period.
             </p>
             <button
               type="submit"
-              disabled={submitting || recordsJson.trim() === ''}
+              disabled={submitting}
               className="inline-flex min-h-10 items-center justify-center gap-2 rounded-lg bg-emerald-800 px-4 py-2 text-sm font-semibold text-white hover:bg-emerald-900 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-emerald-700 disabled:cursor-not-allowed disabled:opacity-60"
             >
               {submitting ? (
@@ -301,7 +310,7 @@ export function AnalyticsPage() {
               ) : (
                 <Play size={15} aria-hidden="true" />
               )}
-              {submitting ? 'Analyzing records…' : 'Run analysis'}
+              {submitting ? 'Loading records and analyzing…' : 'Analyze stored records'}
             </button>
           </div>
         </form>
@@ -314,19 +323,29 @@ export function AnalyticsPage() {
           aria-live="polite"
         >
           <LoaderCircle size={22} className="animate-spin text-emerald-800" aria-hidden="true" />
-          Analyzing the supplied records…
+          Loading every page for this period and analyzing stored records…
         </div>
       )}
 
-      {!submitting && !result && !apiError && (
+      {!submitting && noRecords && (
+        <div className="flex min-h-44 flex-col items-center justify-center rounded-xl border border-dashed border-slate-300 bg-white px-6 py-10 text-center" role="status">
+          <CalendarDays size={21} className="text-slate-500" aria-hidden="true" />
+          <p className="mt-3 text-sm font-medium text-slate-800">No stored records in this period</p>
+          <p className="mt-1 max-w-lg text-xs leading-5 text-slate-500">
+            Choose a wider reporting period or add resource records before running analytics.
+          </p>
+        </div>
+      )}
+
+      {!submitting && !result && !noRecords && !apiError && (
         <div className="flex min-h-44 flex-col items-center justify-center rounded-xl border border-dashed border-slate-300 bg-white px-6 py-10 text-center">
           <span className="flex size-11 items-center justify-center rounded-xl bg-slate-100 text-slate-500">
             <BarChart3 size={21} aria-hidden="true" />
           </span>
-          <p className="mt-3 text-sm font-medium text-slate-800">Analysis results will appear here</p>
+          <p className="mt-3 text-sm font-medium text-slate-800">Stored-record analysis will appear here</p>
           <p className="mt-1 max-w-lg text-xs leading-5 text-slate-500">
-            Submit valid resource records to view the backend’s utilization statistics,
-            trends, and data-quality summary.
+            Select a reporting period and analyze its stored observations to view
+            backend utilization statistics, trends, and data-quality summary.
           </p>
         </div>
       )}
@@ -339,6 +358,9 @@ export function AnalyticsPage() {
               <h3 id="results-heading" className="mt-1 text-xl font-semibold tracking-tight text-slate-950">
                 Utilization and workload findings
               </h3>
+              <p className="mt-1 text-xs text-slate-500">
+                Backend analysis of {formatNumber(result.record_count)} stored record{result.record_count === 1 ? '' : 's'}.
+              </p>
             </div>
             <div className="inline-flex w-fit items-center gap-2 rounded-full border border-emerald-200 bg-emerald-50 px-3 py-1.5 text-xs font-medium text-emerald-900">
               <CheckCircle2 size={14} aria-hidden="true" />

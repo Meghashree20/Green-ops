@@ -3,6 +3,8 @@
 import pytest
 from datetime import datetime, timezone
 
+from pydantic import ValidationError
+
 from backend.schemas.recommendation import (
     ConfidenceLevel,
     PerformanceConstraints,
@@ -49,6 +51,32 @@ def test_empty_dataset_insufficient_data():
     assert res.recommendation.evidence.peak_memory_pct is None
     assert res.recommendation.potential_benefit is None
     assert "No resource usage records" in res.recommendation.reason
+
+
+def test_same_workload_id_records_are_accepted_for_evaluation():
+    records = [
+        _make_record(workload_id="service-alpha", cpu=15.0, mem=20.0, minute=i)
+        for i in range(6)
+    ]
+
+    req = RecommendationRequest(records=records)
+    result = evaluate_recommendations(req)
+
+    assert result.workload_id == "service-alpha"
+    assert result.recommendation.category == RecommendationCategory.RIGHTSIZE_DOWN
+
+
+def test_mixed_workload_ids_are_rejected_before_service_evaluation():
+    records = [
+        _make_record(workload_id="service-alpha", minute=0),
+        _make_record(workload_id="service-beta", minute=1),
+    ]
+
+    with pytest.raises(
+        ValidationError,
+        match="All records in a recommendation request must have the same workload_id",
+    ):
+        RecommendationRequest(records=records)
 
 
 # ── Single Sample Guard ───────────────────────────────────────────────────────
@@ -152,6 +180,90 @@ def test_rightsize_up_on_latency_violation():
     assert res.recommendation.category == RecommendationCategory.RIGHTSIZE_UP
     assert res.recommendation.evidence.latency_violations_count == 5
     assert "SLA latency violation" in res.recommendation.reason
+
+
+def test_missing_latency_with_constraint_does_not_recommend_downsize():
+    records = [_make_record(cpu=15.0, mem=20.0, minute=i) for i in range(6)]
+    req = RecommendationRequest(
+        records=records,
+        constraints=PerformanceConstraints(max_latency_p99_ms=100.0),
+    )
+
+    recommendation = evaluate_recommendations(req).recommendation
+
+    assert recommendation.category == RecommendationCategory.MAINTAIN
+    assert recommendation.sufficiency_status == SufficiencyStatus.MARGINAL
+    assert recommendation.confidence == ConfidenceLevel.LOW
+    assert recommendation.potential_benefit is None
+    assert "latency constraint cannot be evaluated" in recommendation.reason
+    assert any(
+        "Latency compliance cannot be determined" in warning
+        and "6 of 6 observations" in warning
+        for warning in recommendation.warnings
+    )
+
+
+def test_partially_missing_latency_with_constraint_does_not_recommend_downsize():
+    records = [
+        _make_record(cpu=15.0, mem=20.0, latency=80.0 if minute < 5 else None, minute=minute)
+        for minute in range(6)
+    ]
+    req = RecommendationRequest(
+        records=records,
+        constraints=PerformanceConstraints(max_latency_p99_ms=100.0),
+    )
+
+    recommendation = evaluate_recommendations(req).recommendation
+
+    assert recommendation.category == RecommendationCategory.MAINTAIN
+    assert recommendation.sufficiency_status == SufficiencyStatus.MARGINAL
+    assert recommendation.confidence == ConfidenceLevel.LOW
+    assert recommendation.evidence.observed_p99_latency_max_ms == pytest.approx(80.0)
+    assert recommendation.evidence.latency_violations_count == 0
+    assert any(
+        "Latency compliance cannot be determined" in warning
+        and "1 of 6 observations" in warning
+        for warning in recommendation.warnings
+    )
+
+
+def test_complete_compliant_latency_allows_existing_downsize_rule():
+    records = [
+        _make_record(cpu=15.0, mem=20.0, latency=80.0, minute=minute)
+        for minute in range(6)
+    ]
+    req = RecommendationRequest(
+        records=records,
+        constraints=PerformanceConstraints(max_latency_p99_ms=100.0),
+    )
+
+    recommendation = evaluate_recommendations(req).recommendation
+
+    assert recommendation.category == RecommendationCategory.RIGHTSIZE_DOWN
+    assert recommendation.sufficiency_status == SufficiencyStatus.SUFFICIENT
+    assert recommendation.confidence == ConfidenceLevel.MEDIUM
+    assert recommendation.evidence.latency_violations_count == 0
+    assert not any(
+        "Latency compliance cannot be determined" in warning
+        for warning in recommendation.warnings
+    )
+
+
+def test_missing_latency_without_constraint_preserves_existing_downsize_rule():
+    records = [_make_record(cpu=15.0, mem=20.0, minute=i) for i in range(6)]
+    req = RecommendationRequest(records=records)
+
+    recommendation = evaluate_recommendations(req).recommendation
+
+    assert recommendation.category == RecommendationCategory.RIGHTSIZE_DOWN
+    assert recommendation.sufficiency_status == SufficiencyStatus.SUFFICIENT
+    assert recommendation.confidence == ConfidenceLevel.MEDIUM
+    assert recommendation.evidence.observed_p99_latency_max_ms is None
+    assert recommendation.evidence.latency_violations_count == 0
+    assert not any(
+        "Latency compliance cannot be determined" in warning
+        for warning in recommendation.warnings
+    )
 
 
 # ── Rightsize Down: Low Utilization with Sufficient Samples ───────────────────

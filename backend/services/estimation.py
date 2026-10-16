@@ -15,7 +15,8 @@ FORMULA REFERENCE  (see schemas/estimation.py for full narrative)
     (billing approximation, requires cpu_utilization_pct)
 
   estimated_energy_kwh         = (tdp_watts × cpu_pct/100 × duration_hours) / 1000
-    (TDP-proxy, requires server_tdp_watts + cpu_utilization_pct)
+    (uncalibrated illustrative proxy, not measured power; assumes zero at 0% CPU;
+     no idle-power or PUE adjustment)
 
   estimated_carbon_kg_co2e     = energy_kwh × emissions_factor
     (grid-average, requires energy + emissions_factor_kg_co2_per_kwh)
@@ -72,9 +73,11 @@ def estimate(req: EstimationRequest) -> EstimationResult:
             estimated_power_draw_watts * duration_hours / 1000.0, _KWH_DP
         )
         warnings.append(
-            "estimated_energy_kwh uses TDP × CPU% as a proxy for server power draw. "
-            "Actual consumption depends on hardware model, memory load, idle baseline "
-            "and data-centre PUE, none of which are captured here."
+            "estimated_energy_kwh is an illustrative, uncalibrated TDP × CPU% proxy, "
+            "not measured server power or a calibrated model of actual power. It may "
+            "underestimate or overestimate energy and assumes zero power at 0% CPU. "
+            "Idle power, other hardware loads, and data-centre PUE are not included; "
+            "no PUE adjustment is applied."
         )
     elif req.server_tdp_watts is None and req.cpu_utilization_pct is not None:
         warnings.append(
@@ -99,6 +102,24 @@ def estimate(req: EstimationRequest) -> EstimationResult:
             "estimated_carbon_kg_co2e uses a grid-average emissions factor. "
             "Actual carbon intensity varies by region, time and energy mix."
         )
+        warnings.append(
+            "Emissions-factor provenance is user-supplied and has not been independently verified."
+        )
+        unspecified_provenance = [
+            label
+            for field, label in (
+                (req.emissions_factor_source, "source"),
+                (req.emissions_factor_region, "geographic region"),
+                (req.emissions_factor_reference_period, "reference year or period"),
+            )
+            if field is None
+        ]
+        if unspecified_provenance:
+            warnings.append(
+                "Emissions-factor provenance unspecified: "
+                + ", ".join(unspecified_provenance)
+                + "."
+            )
 
     assumptions = EstimationAssumptions(
         hourly_instance_rate_usd=req.hourly_instance_rate_usd,
@@ -107,6 +128,9 @@ def estimate(req: EstimationRequest) -> EstimationResult:
         cpu_utilization_pct=req.cpu_utilization_pct,
         server_tdp_watts=req.server_tdp_watts,
         emissions_factor_kg_co2_per_kwh=req.emissions_factor_kg_co2_per_kwh,
+        emissions_factor_source=req.emissions_factor_source,
+        emissions_factor_region=req.emissions_factor_region,
+        emissions_factor_reference_period=req.emissions_factor_reference_period,
     )
 
     return EstimationResult(

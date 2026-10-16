@@ -53,3 +53,22 @@ def test_recommendation_empty_records_200():
     assert evidence["mean_memory_pct"] is None
     assert evidence["peak_memory_pct"] is None
     assert "No resource usage records" in data["recommendation"]["reason"]
+
+
+def test_recommendation_mixed_workload_ids_return_422():
+    payload = {
+        "records": [
+            {**SAMPLE_RECORDS[0], "workload_id": "service-alpha"},
+            {**SAMPLE_RECORDS[1], "workload_id": "service-beta"},
+        ]
+    }
+
+    response = client.post("/api/v1/recommendations/evaluate", json=payload)
+
+    assert response.status_code == 422
+    errors = response.json()["detail"]
+    assert any(
+        "All records in a recommendation request must have the same workload_id."
+        in error["msg"]
+        for error in errors
+    )

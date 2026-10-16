@@ -1,6 +1,7 @@
 import {
   AlertCircle,
   AlertTriangle,
+  CalendarDays,
   CheckCircle2,
   ClipboardCheck,
   Cpu,
@@ -13,19 +14,22 @@ import {
   Sparkles,
   Wallet,
 } from 'lucide-react'
-import { useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import type { FormEvent } from 'react'
 import type { LucideIcon } from 'lucide-react'
 import { DashboardPanel } from '../components/dashboard/DashboardPanel'
-import { ApiError, evaluateWorkload } from '../services/api'
+import {
+  ApiError,
+  evaluateWorkload,
+  listResourceRecordsForAnalysis,
+} from '../services/api'
 import type {
   RecommendationRequest,
   RecommendationResponse,
 } from '../types/recommendation'
-import type { ResourceRecordInput } from '../types/resource'
+import type { ResourceRecord } from '../types/resource'
 
 interface FormValues {
-  records: string
   allocated_cpu_cores: string
   allocated_memory_gb: string
   hourly_rate_usd: string
@@ -34,14 +38,33 @@ interface FormValues {
   min_samples_threshold: string
 }
 
+interface ReportingPeriod {
+  from_dt: string
+  to_dt: string
+}
+
 const emptyValues: FormValues = {
-  records: '',
   allocated_cpu_cores: '',
   allocated_memory_gb: '',
   hourly_rate_usd: '',
   max_latency_p99_ms: '',
   target_cpu_headroom_pct: '',
   min_samples_threshold: '5',
+}
+
+function toDateTimeLocalValue(date: Date): string {
+  return new Date(date.getTime() - date.getTimezoneOffset() * 60_000)
+    .toISOString()
+    .slice(0, 16)
+}
+
+function defaultReportingPeriod(): ReportingPeriod {
+  const to = new Date()
+  const from = new Date(to.getTime() - 7 * 24 * 60 * 60 * 1000)
+  return {
+    from_dt: toDateTimeLocalValue(from),
+    to_dt: toDateTimeLocalValue(to),
+  }
 }
 
 const categoryStyles: Record<string, string> = {
@@ -53,62 +76,6 @@ const categoryStyles: Record<string, string> = {
 
 function isObject(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
-}
-
-function validateRecords(value: unknown): string[] {
-  if (!Array.isArray(value)) return ['Records must be provided as a JSON array.']
-
-  const errors: string[] = []
-  value.forEach((record, index) => {
-    const prefix = `Record ${index + 1}`
-    if (!isObject(record)) {
-      errors.push(`${prefix} must be a JSON object.`)
-      return
-    }
-
-    if (
-      typeof record.workload_id !== 'string' ||
-      !record.workload_id.trim() ||
-      record.workload_id.trim().length > 128
-    ) {
-      errors.push(`${prefix}: workload_id must be nonblank and no longer than 128 characters.`)
-    }
-    if (
-      typeof record.timestamp !== 'string' ||
-      !record.timestamp.trim() ||
-      !Number.isFinite(Date.parse(record.timestamp))
-    ) {
-      errors.push(`${prefix}: timestamp must be a valid ISO-8601 date/time string.`)
-    }
-    for (const field of ['cpu_utilization', 'memory_utilization'] as const) {
-      const fieldValue = record[field]
-      if (
-        typeof fieldValue !== 'number' ||
-        !Number.isFinite(fieldValue) ||
-        fieldValue < 0 ||
-        fieldValue > 100
-      ) {
-        errors.push(`${prefix}: ${field} must be a number from 0 to 100.`)
-      }
-    }
-    if (
-      typeof record.duration_seconds !== 'number' ||
-      !Number.isFinite(record.duration_seconds) ||
-      record.duration_seconds <= 0
-    ) {
-      errors.push(`${prefix}: duration_seconds must be a number greater than 0.`)
-    }
-    if (
-      'latency_p99_ms' in record &&
-      record.latency_p99_ms !== null &&
-      (typeof record.latency_p99_ms !== 'number' ||
-        !Number.isFinite(record.latency_p99_ms) ||
-        record.latency_p99_ms < 0)
-    ) {
-      errors.push(`${prefix}: latency_p99_ms must be null or a number greater than or equal to 0.`)
-    }
-  })
-  return errors
 }
 
 function getErrorMessage(error: unknown): string {
@@ -373,11 +340,33 @@ function ResultView({ result }: { result: RecommendationResponse }) {
 
 export function RecommendationsPage() {
   const [values, setValues] = useState(emptyValues)
+  const [period, setPeriod] = useState(defaultReportingPeriod)
+  const [records, setRecords] = useState<ResourceRecord[]>([])
+  const [recordsLoaded, setRecordsLoaded] = useState(false)
+  const [recordsError, setRecordsError] = useState<string | null>(null)
+  const [recordsLoading, setRecordsLoading] = useState(false)
+  const [selectedWorkloadId, setSelectedWorkloadId] = useState('')
   const [validationErrors, setValidationErrors] = useState<string[]>([])
   const [apiError, setApiError] = useState<string | null>(null)
   const [result, setResult] = useState<RecommendationResponse | null>(null)
   const [lastRequest, setLastRequest] = useState<RecommendationRequest | null>(null)
   const [submitting, setSubmitting] = useState(false)
+  const [lastRecordQuery, setLastRecordQuery] = useState<ReportingPeriod | null>(null)
+  const recordsController = useRef<AbortController | null>(null)
+  const evaluationController = useRef<AbortController | null>(null)
+  const workloads = useMemo(
+    () => [...new Set(records.map((record) => record.workload_id))].sort(),
+    [records],
+  )
+  const selectedRecords = useMemo(
+    () => records.filter((record) => record.workload_id === selectedWorkloadId),
+    [records, selectedWorkloadId],
+  )
+
+  useEffect(() => () => {
+    recordsController.current?.abort()
+    evaluationController.current?.abort()
+  }, [])
 
   const updateValue = (field: keyof FormValues, value: string) => {
     setValues((current) => ({ ...current, [field]: value }))
@@ -385,18 +374,71 @@ export function RecommendationsPage() {
     setApiError(null)
   }
 
+  const loadRecords = async (selectedPeriod: ReportingPeriod) => {
+    recordsController.current?.abort()
+    const controller = new AbortController()
+    recordsController.current = controller
+    setRecordsLoading(true)
+    setRecordsError(null)
+    setRecords([])
+    setRecordsLoaded(false)
+    setSelectedWorkloadId('')
+    setResult(null)
+    setApiError(null)
+    setLastRecordQuery(selectedPeriod)
+
+    try {
+      const loadedRecords = await listResourceRecordsForAnalysis(
+        selectedPeriod,
+        controller.signal,
+      )
+      if (!controller.signal.aborted) {
+        setRecords(loadedRecords)
+        setRecordsLoaded(true)
+      }
+    } catch (error) {
+      if (!controller.signal.aborted) setRecordsError(getErrorMessage(error))
+    } finally {
+      if (!controller.signal.aborted) {
+        recordsController.current = null
+        setRecordsLoading(false)
+      }
+    }
+  }
+
+  const updateReportingPeriod = (field: keyof ReportingPeriod, value: string) => {
+    recordsController.current?.abort()
+    recordsController.current = null
+    setPeriod((current) => ({ ...current, [field]: value }))
+    setRecords([])
+    setRecordsLoaded(false)
+    setRecordsLoading(false)
+    setRecordsError(null)
+    setLastRecordQuery(null)
+    setSelectedWorkloadId('')
+    setResult(null)
+    setApiError(null)
+    setValidationErrors([])
+  }
+
   const evaluate = async (request: RecommendationRequest) => {
+    evaluationController.current?.abort()
+    const controller = new AbortController()
+    evaluationController.current = controller
     setSubmitting(true)
     setApiError(null)
     setResult(null)
     setLastRequest(request)
     try {
-      const response = await evaluateWorkload(request)
-      setResult(response)
+      const response = await evaluateWorkload(request, controller.signal)
+      if (!controller.signal.aborted) setResult(response)
     } catch (error) {
-      setApiError(getErrorMessage(error))
+      if (!controller.signal.aborted) setApiError(getErrorMessage(error))
     } finally {
-      setSubmitting(false)
+      if (!controller.signal.aborted) {
+        evaluationController.current = null
+        setSubmitting(false)
+      }
     }
   }
 
@@ -405,15 +447,19 @@ export function RecommendationsPage() {
     setValidationErrors([])
     setApiError(null)
     setResult(null)
-
-    let parsedRecords: unknown
-    try {
-      parsedRecords = JSON.parse(values.records)
-    } catch {
-      setValidationErrors(['Enter valid JSON for the records array.'])
-      return
+    const errors: string[] = []
+    if (!recordsLoaded) {
+      errors.push('Load stored records before evaluating a workload.')
+    } else if (records.length === 0) {
+      errors.push('No stored records are available in this reporting period.')
+    } else if (!selectedWorkloadId) {
+      errors.push('Select a workload ID to evaluate.')
+    } else if (selectedRecords.length === 0) {
+      errors.push('No stored records are available for the selected workload.')
     }
-    const errors = validateRecords(parsedRecords)
+    if (selectedRecords.some((record) => record.workload_id !== selectedWorkloadId)) {
+      errors.push('The selected history contains records from another workload. Reload the records before evaluating.')
+    }
 
     const allocations: NonNullable<RecommendationRequest['allocations']> = {}
     const allocationFields = [
@@ -454,10 +500,17 @@ export function RecommendationsPage() {
       errors.push('Minimum sample threshold must be a whole number of at least 1.')
     }
     setValidationErrors(errors)
-    if (errors.length > 0 || !Array.isArray(parsedRecords)) return
+    if (errors.length > 0) return
 
     const request: RecommendationRequest = {
-      records: parsedRecords as ResourceRecordInput[],
+      records: selectedRecords.map((record) => ({
+        workload_id: record.workload_id,
+        timestamp: record.timestamp,
+        cpu_utilization: record.cpu_utilization,
+        memory_utilization: record.memory_utilization,
+        duration_seconds: record.duration_seconds,
+        latency_p99_ms: record.latency_p99_ms,
+      })),
       min_samples_threshold: minSamples,
     }
     if (Object.keys(allocations).length > 0) request.allocations = allocations
@@ -507,37 +560,140 @@ export function RecommendationsPage() {
           <div>
             <h3 className="text-sm font-semibold text-slate-900">Evaluation inputs</h3>
             <p className="mt-1 text-xs leading-5 text-slate-500">
-              Add resource history. Allocation and performance fields are optional.
+              Select stored workload history. Allocation and performance fields are optional.
             </p>
           </div>
         </div>
 
         <form className="space-y-6 p-5 sm:p-6" onSubmit={submit} noValidate>
           <div>
-            <label htmlFor="recommendation-records" className="block text-sm font-medium text-slate-700">
-              Resource history records (JSON array) <span className="text-rose-700" aria-label="required">*</span>
-            </label>
-            <textarea
-              id="recommendation-records"
-              name="records"
-              value={values.records}
-              onChange={(event) => updateValue('records', event.target.value)}
-              disabled={submitting}
-              required
-              spellCheck={false}
-              autoCapitalize="off"
-              autoCorrect="off"
-              placeholder={'[\n  {\n    "workload_id": "...",\n    "timestamp": "ISO-8601 date/time",\n    "cpu_utilization": 0,\n    "memory_utilization": 0,\n    "duration_seconds": 1,\n    "latency_p99_ms": null\n  }\n]'}
-              className="mt-1.5 min-h-48 w-full resize-y rounded-lg border border-slate-300 bg-slate-50/60 px-4 py-3 font-mono text-xs leading-6 text-slate-800 outline-none placeholder:text-slate-400 focus:border-emerald-700 focus:bg-white focus:ring-2 focus:ring-emerald-700/15 disabled:opacity-60 sm:text-sm"
-              aria-describedby="recommendation-record-help"
-              aria-invalid={validationErrors.length > 0}
-            />
-            <p id="recommendation-record-help" className="mt-2 text-xs leading-5 text-slate-500">
-              Each record uses <code>workload_id</code>, <code>timestamp</code>,
-              {' '}<code>cpu_utilization</code> (0–100%), <code>memory_utilization</code> (0–100%),
-              {' '}<code>duration_seconds</code> (&gt;0), and optional <code>latency_p99_ms</code> (≥0 or null).
-              A single sample will not trigger downsizing.
+            <div className="flex items-center gap-2">
+              <CalendarDays size={17} className="text-emerald-800" aria-hidden="true" />
+              <h4 className="text-sm font-semibold text-slate-800">Stored workload history</h4>
+            </div>
+            <p className="mt-1 text-xs leading-5 text-slate-500">
+              Load a bounded reporting period, then evaluate one workload's stored records.
+              All matching pages are retrieved; periods above 10,000 records must be narrowed.
             </p>
+            <div className="mt-4 grid gap-4 sm:grid-cols-2">
+              <label className="text-sm font-medium text-slate-700">
+                From date and time
+                <input
+                  className={inputClass}
+                  type="datetime-local"
+                  value={period.from_dt}
+                  onChange={(event) => updateReportingPeriod('from_dt', event.target.value)}
+                  disabled={recordsLoading || submitting}
+                  required
+                />
+              </label>
+              <label className="text-sm font-medium text-slate-700">
+                To date and time
+                <input
+                  className={inputClass}
+                  type="datetime-local"
+                  value={period.to_dt}
+                  onChange={(event) => updateReportingPeriod('to_dt', event.target.value)}
+                  disabled={recordsLoading || submitting}
+                  required
+                />
+              </label>
+            </div>
+            <div className="mt-4 flex flex-wrap items-center gap-3">
+              <button
+                type="button"
+                disabled={recordsLoading || submitting}
+                onClick={() => {
+                  const from = new Date(period.from_dt)
+                  const to = new Date(period.to_dt)
+                  if (
+                    !period.from_dt ||
+                    !period.to_dt ||
+                    Number.isNaN(from.getTime()) ||
+                    Number.isNaN(to.getTime()) ||
+                    from > to
+                  ) {
+                    setValidationErrors(['Choose a valid reporting period where the start is not after the end.'])
+                    return
+                  }
+                  setValidationErrors([])
+                  void loadRecords({
+                    from_dt: from.toISOString(),
+                    to_dt: to.toISOString(),
+                  })
+                }}
+                className="inline-flex min-h-10 items-center justify-center gap-2 rounded-lg border border-emerald-800 bg-white px-4 py-2 text-sm font-semibold text-emerald-900 hover:bg-emerald-50 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-emerald-700 disabled:cursor-not-allowed disabled:opacity-60"
+              >
+                {recordsLoading ? (
+                  <LoaderCircle size={16} className="animate-spin" aria-hidden="true" />
+                ) : (
+                  <Database size={16} aria-hidden="true" />
+                )}
+                {recordsLoading ? 'Loading history…' : 'Load workload history'}
+              </button>
+              {recordsLoaded && (
+                <span className="text-xs text-slate-600" role="status">
+                  Loaded {records.length} stored {records.length === 1 ? 'record' : 'records'}.
+                </span>
+              )}
+            </div>
+
+            {recordsError && (
+              <div className="mt-4 flex flex-col gap-3 rounded-lg border border-rose-200 bg-rose-50 p-4 sm:flex-row sm:items-center sm:justify-between" role="alert">
+                <p className="text-sm text-rose-900">{recordsError}</p>
+                {lastRecordQuery && (
+                  <button
+                    type="button"
+                    disabled={recordsLoading}
+                    onClick={() => void loadRecords(lastRecordQuery)}
+                    className="inline-flex w-fit items-center gap-2 rounded-md border border-rose-200 bg-white px-3 py-2 text-sm font-medium text-rose-900 hover:bg-rose-100 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-rose-700 disabled:opacity-60"
+                  >
+                    <RefreshCw size={15} aria-hidden="true" />
+                    Retry loading records
+                  </button>
+                )}
+              </div>
+            )}
+
+            {recordsLoaded && records.length === 0 && (
+              <p className="mt-4 rounded-lg border border-slate-200 bg-slate-50 p-4 text-sm text-slate-700" role="status">
+                No stored records match this reporting period. Choose another period and load history again.
+              </p>
+            )}
+
+            {recordsLoaded && records.length > 0 && (
+              <div className="mt-4">
+                <label htmlFor="recommendation-workload" className="block text-sm font-medium text-slate-700">
+                  Workload ID <span className="text-rose-700" aria-label="required">*</span>
+                </label>
+                <select
+                  id="recommendation-workload"
+                  className={inputClass}
+                  value={selectedWorkloadId}
+                  onChange={(event) => {
+                    setSelectedWorkloadId(event.target.value)
+                    setResult(null)
+                    setApiError(null)
+                    setValidationErrors([])
+                  }}
+                  disabled={submitting}
+                  required
+                >
+                  <option value="">Select a stored workload</option>
+                  {workloads.map((workloadId) => (
+                    <option key={workloadId} value={workloadId}>{workloadId}</option>
+                  ))}
+                </select>
+                <p className="mt-2 text-xs leading-5 text-slate-500">
+                  Only records whose workload ID exactly matches this selection will be sent.
+                </p>
+                {selectedWorkloadId && (
+                  <p className="mt-2 text-xs text-slate-600" role="status">
+                    {selectedRecords.length} history {selectedRecords.length === 1 ? 'record' : 'records'} for {selectedWorkloadId}.
+                  </p>
+                )}
+              </div>
+            )}
           </div>
 
           <fieldset disabled={submitting} className="space-y-4">
@@ -696,7 +852,7 @@ export function RecommendationsPage() {
       {submitting && (
         <div className="flex min-h-36 flex-col items-center justify-center gap-3 rounded-xl border border-[var(--color-border)] bg-white text-sm text-slate-600" role="status" aria-live="polite">
           <LoaderCircle size={22} className="animate-spin text-emerald-800" aria-hidden="true" />
-          Evaluating the supplied workload history…
+          Evaluating the selected stored workload history…
         </div>
       )}
 
@@ -717,7 +873,7 @@ export function RecommendationsPage() {
           </span>
           <p className="mt-3 text-sm font-medium text-slate-800">No evaluation yet</p>
           <p className="mt-1 max-w-md text-xs leading-5 text-slate-500">
-            Submit resource history to see the recommendation and evidence returned by the backend.
+            Load stored history and select one workload to see the recommendation and evidence returned by the backend.
           </p>
         </div>
       )}

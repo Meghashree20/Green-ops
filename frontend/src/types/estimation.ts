@@ -5,6 +5,9 @@ export interface EstimationRequest {
   cpu_utilization_pct?: number | null
   server_tdp_watts?: number | null
   emissions_factor_kg_co2_per_kwh?: number | null
+  emissions_factor_source?: string | null
+  emissions_factor_region?: string | null
+  emissions_factor_reference_period?: string | null
 }
 
 export interface EstimationAssumptions {
@@ -14,6 +17,9 @@ export interface EstimationAssumptions {
   cpu_utilization_pct: number | null
   server_tdp_watts: number | null
   emissions_factor_kg_co2_per_kwh: number | null
+  emissions_factor_source?: string | null
+  emissions_factor_region?: string | null
+  emissions_factor_reference_period?: string | null
 }
 
 export interface EstimationResult {

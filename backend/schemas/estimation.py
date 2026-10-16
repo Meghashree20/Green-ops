@@ -1,8 +1,8 @@
 """Pydantic schemas for the cost and carbon estimation endpoint.
 
 UNITS — all fields are explicitly documented with their unit.
-All output values labelled ESTIMATED are derived from configurable assumptions
-and published proxy values, not direct measurements.
+All output values labelled ESTIMATED are derived from caller assumptions or
+illustrative proxies, not direct measurements.
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 FORMULAS (implemented in services/estimation.py)
@@ -20,8 +20,9 @@ FORMULAS (implemented in services/estimation.py)
       server_power_fraction = cpu_utilization_pct / 100        ← proxy, not measured
       estimated_power_draw_watts = server_tdp_watts * server_power_fraction
       estimated_energy_kwh = estimated_power_draw_watts * duration_hours / 1000
-      CAVEAT: TDP-scaling by CPU % is a widely-used proxy; actual power depends on
-      server model, memory load, idle baseline, and PUE which are not captured here.
+      CAVEAT: illustrative, uncalibrated proxy, not a model or measurement of actual
+      server power. It may under- or overestimate energy and returns zero power at
+      zero CPU. Idle power, other hardware loads, and PUE are not included.
 
  4. Carbon (kg CO₂e)   — ESTIMATED, requires energy + emissions_factor_kg_co2_per_kwh:
       estimated_carbon_kg_co2e = estimated_energy_kwh * emissions_factor_kg_co2_per_kwh
@@ -30,7 +31,7 @@ FORMULAS (implemented in services/estimation.py)
 """
 
 from typing import Optional
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 
 # ── Request ───────────────────────────────────────────────────────────────────
@@ -89,6 +90,34 @@ class EstimationRequest(BaseModel):
         ),
         examples=[0.233],
     )
+    emissions_factor_source: Optional[str] = Field(
+        default=None,
+        max_length=200,
+        description="User-supplied reference name for the emissions factor; not independently verified.",
+    )
+    emissions_factor_region: Optional[str] = Field(
+        default=None,
+        max_length=128,
+        description="User-supplied geographic region for the emissions factor; not independently verified.",
+    )
+    emissions_factor_reference_period: Optional[str] = Field(
+        default=None,
+        max_length=100,
+        description="User-supplied reference year or period for the emissions factor; not independently verified.",
+    )
+
+    @field_validator(
+        "emissions_factor_source",
+        "emissions_factor_region",
+        "emissions_factor_reference_period",
+        mode="before",
+    )
+    @classmethod
+    def normalize_emissions_factor_provenance(cls, value: object) -> object:
+        if isinstance(value, str):
+            normalized = value.strip()
+            return normalized or None
+        return value
 
     @model_validator(mode="after")
     def carbon_requires_emissions_factor(self) -> "EstimationRequest":
@@ -125,6 +154,18 @@ class EstimationAssumptions(BaseModel):
         default=None,
         description="kg CO₂e/kWh — caller-supplied grid factor; None if not provided.",
     )
+    emissions_factor_source: Optional[str] = Field(
+        default=None,
+        description="User-supplied reference name; not independently verified.",
+    )
+    emissions_factor_region: Optional[str] = Field(
+        default=None,
+        description="User-supplied geographic region; not independently verified.",
+    )
+    emissions_factor_reference_period: Optional[str] = Field(
+        default=None,
+        description="User-supplied reference year or period; not independently verified.",
+    )
 
 
 class EstimationResult(BaseModel):
@@ -151,10 +192,12 @@ class EstimationResult(BaseModel):
     estimated_energy_kwh: Optional[float] = Field(
         default=None,
         description=(
-            "ESTIMATED — proxy energy consumption in kWh. "
+            "ESTIMATED — illustrative, uncalibrated proxy energy consumption in kWh; "
+            "not measured server power or a calibrated model of actual power. "
             "Formula: (server_tdp_watts × cpu_utilization_pct/100 × duration_hours) / 1000. "
-            "TDP-scaling by CPU % is a proxy; actual power depends on hardware, "
-            "memory load, idle baseline and PUE — none of which are captured here. "
+            "May underestimate or overestimate energy and assumes zero power at 0% CPU. "
+            "Hardware-specific power behavior, idle power, other loads, and data-centre "
+            "PUE are not captured; no PUE adjustment is applied. "
             "None when server_tdp_watts or cpu_utilization_pct is absent."
         ),
     )

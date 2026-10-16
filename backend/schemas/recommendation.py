@@ -2,7 +2,7 @@
 
 from enum import Enum
 from typing import Optional
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from backend.schemas.resource import ResourceRecordIn
 
@@ -103,6 +103,15 @@ class RecommendationRequest(BaseModel):
         ge=1,
         description="Minimum observations required to consider data sufficient for downsizing.",
     )
+
+    @model_validator(mode="after")
+    def records_belong_to_single_workload(self) -> "RecommendationRequest":
+        workload_ids = {record.workload_id for record in self.records}
+        if len(workload_ids) > 1:
+            raise ValueError(
+                "All records in a recommendation request must have the same workload_id."
+            )
+        return self
 
 
 class RecommendationResponse(BaseModel):

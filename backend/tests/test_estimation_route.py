@@ -93,6 +93,46 @@ def test_assumptions_echoed_in_response():
     assert assumptions["cpu_utilization_pct"] == pytest.approx(50.0)
 
 
+def test_emissions_factor_provenance_echoed_by_http_without_changing_estimate():
+    payload = {
+        **FULL,
+        "emissions_factor_source": "Grid data report",
+        "emissions_factor_region": "Region X",
+        "emissions_factor_reference_period": "2025",
+    }
+
+    response = client.post("/api/v1/estimation/estimate", json=payload)
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["estimated_energy_kwh"] == pytest.approx(0.1)
+    assert body["estimated_carbon_kg_co2e"] == pytest.approx(0.0233)
+    assert body["assumptions"]["emissions_factor_source"] == "Grid data report"
+    assert body["assumptions"]["emissions_factor_region"] == "Region X"
+    assert body["assumptions"]["emissions_factor_reference_period"] == "2025"
+
+
+def test_legacy_request_without_provenance_remains_compatible():
+    response = client.post("/api/v1/estimation/estimate", json=FULL)
+
+    assert response.status_code == 200
+    assumptions = response.json()["assumptions"]
+    assert assumptions["emissions_factor_source"] is None
+    assert assumptions["emissions_factor_region"] is None
+    assert assumptions["emissions_factor_reference_period"] is None
+
+
+def test_emissions_factor_provenance_over_length_limit_returns_422():
+    payload = {
+        **FULL,
+        "emissions_factor_source": "s" * 201,
+    }
+
+    response = client.post("/api/v1/estimation/estimate", json=payload)
+
+    assert response.status_code == 422
+
+
 def test_warnings_non_empty_with_full_payload():
     response = client.post("/api/v1/estimation/estimate", json=FULL)
     assert len(response.json()["warnings"]) > 0

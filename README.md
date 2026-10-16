@@ -106,6 +106,28 @@ The frontend's client-side routes are:
 | Cost & Carbon | `/cost-carbon` |
 | Recommendations | `/recommendations` |
 
+The Analytics page loads stored resource records for a selectable reporting
+period (default: the previous seven days), retrieves every 100-record page,
+and submits up to 10,000 matching records to the analytics API. Periods above
+that limit must be narrowed. Analytics calculations remain backend-owned.
+
+The Cost & Carbon page can load records for a selectable reporting period and
+prefill workload ID, observed duration, and CPU utilization from a chosen
+record. Hourly rate, server TDP, and emissions factor remain caller-supplied
+assumptions; the existing backend estimator remains the calculation source.
+The emission-factor source/reference, geographic region, and reference year or
+period can also be supplied and are echoed with the estimate. Blank provenance is
+shown as unspecified; entered metadata is not independently verified, and no
+emission-factor value is selected or fetched automatically. The carbon formula
+is unchanged.
+
+The Recommendations page loads stored records for a selectable reporting
+period, retrieves every 100-record page, and lets the user evaluate one
+workload ID at a time. Only that workload's matching history is sent to the
+existing recommendation API; periods above 10,000 records must be narrowed.
+Backend insufficiency, confidence, evidence, warnings, and verification
+conditions are displayed as returned.
+
 Resource records use `workload_id` (1–128 characters), `timestamp`,
 `cpu_utilization` and `memory_utilization` (0–100%), positive
 `duration_seconds`, and optional non-negative `latency_p99_ms`. Mixed
@@ -167,11 +189,20 @@ before treating any item as freshly verified.
 All estimator outputs are estimates, not direct measurements. The hourly
 instance rate, server TDP, and emissions factor are caller-supplied; no live
 price or emissions-factor source is queried. Energy uses the implemented
-TDP × CPU utilization proxy and omits idle power, other hardware loads, and
-data-centre PUE. Carbon uses the supplied kg CO2e/kWh factor, but the app does
-not record its source, region, or year. The example factor in the API schema
-is not a validated default. Underutilization and recommendation thresholds are
-project heuristics, not scientifically calibrated rules.
+illustrative, uncalibrated CPU-scaled TDP proxy:
+
+`estimated_energy_kwh = (server_tdp_watts [W] × cpu_utilization_pct / 100 × duration_hours [h]) / 1000`
+
+This proxy is not measured server power or a calibrated model of actual power;
+it may under- or overestimate energy and assumes zero power at 0% CPU. It omits
+idle power and other hardware loads. PUE is not applied. Carbon remains
+`estimated_energy_kwh × emissions_factor_kg_co2_per_kwh [kg CO2e/kWh]`; this
+phase does not change either formula or resulting values. Emission-factor source,
+region, and reference period can be supplied as user metadata and are echoed
+with estimates, but are not independently verified; unspecified metadata is
+shown as unspecified. The example factor in the API schema is not a validated
+default. Underutilization and recommendation thresholds are project heuristics,
+not scientifically calibrated rules.
 
 See [DOMAIN_ASSUMPTIONS.md](./DOMAIN_ASSUMPTIONS.md) for formulas, units,
 sources reviewed, validation status, and omissions. Do not claim scientific
