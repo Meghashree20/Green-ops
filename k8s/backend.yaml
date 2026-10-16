@@ -1,0 +1,40 @@
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: greenops-backend
+  namespace: greenops
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: greenops-backend
+  template:
+    metadata:
+      labels:
+        app: greenops-backend
+    spec:
+      containers:
+        - name: backend
+          image: greenops-backend:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8000
+          env:
+            - name: MONGODB_URI
+              value: "mongodb://host.docker.internal:27017"
+            - name: MONGODB_DB_NAME
+              value: "greenops"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: greenops-backend
+  namespace: greenops
+spec:
+  type: ClusterIP
+  selector:
+    app: greenops-backend
+  ports:
+    - port: 8000
+      targetPort: 8000
