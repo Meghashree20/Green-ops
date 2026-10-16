@@ -1,3 +1,4 @@
+
 """FastAPI application entry point."""
 
 from contextlib import asynccontextmanager
@@ -9,12 +10,16 @@ from fastapi.responses import JSONResponse
 
 from backend.config import settings
 from backend.db.mongo import close_client
-from backend.middleware import CsvUploadSizeLimitMiddleware, MAX_CSV_REQUEST_BODY_BYTES
+from backend.middleware import (
+    CsvUploadSizeLimitMiddleware,
+    MAX_CSV_REQUEST_BODY_BYTES,
+)
 from backend.routes.health import router as health_router
 from backend.routes.resources import router as resources_router
 from backend.routes.analytics import router as analytics_router
 from backend.routes.estimation import router as estimation_router
 from backend.routes.recommendations import router as recommendations_router
+
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
@@ -30,6 +35,17 @@ app = FastAPI(
     version="0.1.0",
     lifespan=lifespan,
 )
+
+
+# Root endpoint: confirms that the backend is running.
+@app.get("/")
+async def root():
+    return {
+        "message": "GreenOps Backend is running",
+        "status": "success",
+        "docs": "/docs",
+        "api_prefix": "/api/v1",
+    }
 
 
 @app.exception_handler(RequestValidationError)
