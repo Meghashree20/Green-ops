@@ -83,6 +83,34 @@ forwards requests to the backend, which uses Uvicorn's default
 `127.0.0.1:8000` bind. Keep the backend running while using API-backed pages;
 resource listing and uploads also require a reachable MongoDB instance.
 
+## Kubernetes deployment
+
+The manifests target Docker Desktop Kubernetes, an existing NGINX Ingress
+controller, and MongoDB reachable from the cluster at
+`host.docker.internal:27017`. Build the images and apply the manifests from the
+project root:
+
+```powershell
+docker build -t greenops-backend:latest -f backend\Dockerfile .
+docker build -t greenops-frontend:latest frontend
+kubectl create namespace greenops --dry-run=client -o yaml | kubectl apply -f -
+kubectl apply -f k8s\backend.yaml
+kubectl apply -f k8s\frontend.yaml
+kubectl apply -f k8s\ingress.yaml
+kubectl rollout status deployment/greenops-backend -n greenops
+kubectl rollout status deployment/greenops-frontend -n greenops
+```
+
+The frontend manifest supplies the NGINX SPA fallback through a ConfigMap so
+direct navigation to frontend routes works. The cluster must be able to access
+the image tags in the deployments. Kubernetes may retain an existing
+`IfNotPresent` image when a local image is rebuilt with the same tag; for
+updated images, publish them to a registry accessible to the cluster and
+update the manifest image references to the published tags.
+
+With the NGINX Ingress controller running, open
+<http://greenops.127.0.0.1.nip.io>.
+
 ## API and routes
 
 - Health: <http://127.0.0.1:8000/api/v1/health>

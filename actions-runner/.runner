@@ -1,0 +1,11 @@
+﻿{
+  "agentId": 21,
+  "agentName": "LAPTOP-KBU527SH",
+  "poolId": 1,
+  "poolName": "Default",
+  "serverUrl": "https://pipelinesghubeus13.actions.githubusercontent.com/PgcuWq9ge6yVJI7eI3Tu4QzGpxv2dvm5q6SyJsz6p6EX28C5Wi/",
+  "gitHubUrl": "https://github.com/Meghashree20/Green-ops",
+  "workFolder": "_work",
+  "useV2Flow": true,
+  "serverUrlV2": "https://broker.actions.githubusercontent.com/"
+}
