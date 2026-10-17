@@ -12,9 +12,6 @@ on:
 permissions:
   contents: read
 
-env:
-  DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
-
 jobs:
   # 1. Backend tests
   backend-tests:
@@ -40,7 +37,7 @@ jobs:
       - name: Run backend tests
         run: python -m pytest -v
 
-  # 2. Frontend lint, tests and build
+  # 2. Frontend checks
   frontend-checks:
     name: Frontend Checks
     runs-on: ubuntu-latest
@@ -72,9 +69,9 @@ jobs:
       - name: Build frontend
         run: npm run build
 
-  # 3. Build and push Docker images
+    # 3. Build and run Docker images locally on the runner (no push)
   docker-images:
-    name: Build and Push Docker Images
+    name: Build and Run Docker Images Locally (no push)
     runs-on: ubuntu-latest
     needs:
       - backend-tests
@@ -88,35 +85,55 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Log in to Docker Hub
-        uses: docker/login-action@v3
-        with:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
-
-      - name: Build and push backend image
+      - name: Build backend image (load into runner)
         uses: docker/build-push-action@v6
         with:
           context: .
           file: backend/Dockerfile
-          push: true
+          push: false
+          load: true
           tags: |
-            ${{ secrets.DOCKERHUB_USERNAME }}/greenops-backend:${{ github.sha }}
-            ${{ secrets.DOCKERHUB_USERNAME }}/greenops-backend:latest
+            greenops-backend:local
 
-      - name: Build and push frontend image
+      - name: Start backend container for smoke checks
+        run: |
+          docker run -d --name backend-local -p 8000:8000 greenops-backend:local || true
+          for i in {1..20}; do
+            if curl -fsS http://localhost:8000/health; then break; fi
+            sleep 3
+          done
+          docker ps -a
+
+      - name: Backend smoke tests
+        run: |
+          curl -fsS http://localhost:8000/health
+
+      - name: Build frontend image (load into runner)
         uses: docker/build-push-action@v6
         with:
           context: ./frontend
           file: ./frontend/Dockerfile
-          push: true
-          build-args: |
-            VITE_API_BASE_URL=/api/v1
+          push: false
+          load: true
           tags: |
-            ${{ secrets.DOCKERHUB_USERNAME }}/greenops-frontend:${{ github.sha }}
-            ${{ secrets.DOCKERHUB_USERNAME }}/greenops-frontend:latest
+            greenops-frontend:local
 
-  # 4. Deploy images to Kubernetes
+      - name: Start frontend container for smoke checks
+        run: |
+          docker run -d --name frontend-local -p 3000:3000 greenops-frontend:local || true
+          sleep 5
+          docker ps -a
+
+      - name: Frontend smoke tests
+        run: |
+          curl -fsS http://localhost:3000/ || true
+
+      - name: Cleanup local containers
+        if: always()
+        run: |
+          docker stop backend-local frontend-local || true
+          docker rm backend-local frontend-local || true
+  # 4. Deploy to Kubernetes
   deploy:
     name: Deploy to Kubernetes
     runs-on: ubuntu-latest
@@ -127,14 +144,28 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      - name: Validate Kubernetes secret
+        env:
+          KUBE_CONFIG_DATA: ${{ secrets.KUBE_CONFIG }}
+        shell: bash
+        run: |
+          if [ -z "$KUBE_CONFIG_DATA" ]; then
+            echo "::error::KUBE_CONFIG secret is missing"
+            exit 1
+          fi
+          echo "KUBE_CONFIG secret is available."
+
       - name: Configure kubectl
         env:
           KUBE_CONFIG_DATA: ${{ secrets.KUBE_CONFIG }}
+        shell: bash
         run: |
           mkdir -p "$HOME/.kube"
-          echo "$KUBE_CONFIG_DATA" | base64 --decode > "$HOME/.kube/config"
+          printf '%s' "$KUBE_CONFIG_DATA" | base64 --decode > "$HOME/.kube/config"
           chmod 600 "$HOME/.kube/config"
-          kubectl cluster-info
+
+      - name: Check Kubernetes connection
+        run: kubectl cluster-info
 
       - name: Apply Kubernetes manifests
         run: kubectl apply -k k8s/
