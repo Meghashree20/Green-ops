@@ -7,20 +7,20 @@ metadata:
 spec:
   ingressClassName: nginx
   rules:
-    - host: greenops.127.0.0.1.nip.io
+    - host: greenops.local
       http:
         paths:
           - path: /api
             pathType: Prefix
             backend:
               service:
-                name: greenops-backend
+                name: greenops-backend-service
                 port:
                   number: 8000
           - path: /
             pathType: Prefix
             backend:
               service:
-                name: greenops-frontend
+                name: greenops-frontend-service
                 port:
                   number: 80

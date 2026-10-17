@@ -1,0 +1,23 @@
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: greenops-frontend
+  namespace: greenops
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: greenops-frontend
+  template:
+    metadata:
+      labels:
+        app: greenops-frontend
+    spec:
+      containers:
+        - name: frontend
+          image: YOUR_DOCKERHUB_USERNAME/greenops-frontend:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 80
+

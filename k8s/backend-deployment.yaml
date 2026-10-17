@@ -1,0 +1,25 @@
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: greenops-backend
+  namespace: greenops
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: greenops-backend
+  template:
+    metadata:
+      labels:
+        app: greenops-backend
+    spec:
+      containers:
+        - name: backend
+          image: YOUR_DOCKERHUB_USERNAME/greenops-backend:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8000
+          env:
+            - name: PORT
+              value: "8000"

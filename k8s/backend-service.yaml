@@ -1,0 +1,14 @@
+
+apiVersion: v1
+kind: Service
+metadata:
+  name: greenops-backend-service
+  namespace: greenops
+spec:
+  type: ClusterIP
+  selector:
+    app: greenops-backend
+  ports:
+    - name: http
+      port: 8000
+      targetPort: 8000
