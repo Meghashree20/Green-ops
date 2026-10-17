@@ -37,9 +37,11 @@ Copy-Item .env.example .env
 | `UNDERUTIL_CPU_THRESHOLD_PCT` | `20.0` | Configurable CPU percentage threshold for the analytics underutilization rule (0–100). |
 | `UNDERUTIL_MEM_THRESHOLD_PCT` | `20.0` | Configurable memory percentage threshold (0–100). |
 
-The frontend's `frontend/.env.example` sets
-`VITE_API_BASE_URL=http://127.0.0.1:8000`. Optionally copy it to
-`frontend/.env.local` and adjust the base URL:
+The frontend uses same-origin API requests by default. Vite proxies `/api`
+requests to `http://127.0.0.1:8000` during local development; the production
+frontend container proxies `/api` to the `greenops-backend` Kubernetes service.
+If you run the frontend and backend on separate origins, set
+`VITE_API_BASE_URL` to the backend origin in `frontend/.env.local`:
 
 ```powershell
 Copy-Item frontend\.env.example frontend\.env.local
@@ -76,8 +78,10 @@ npm run dev
 ```
 
 The Vite dev server uses `http://127.0.0.1:3000` and fails rather than silently
-choosing another port if that port is already occupied. The backend command
-uses Uvicorn's default `127.0.0.1:8000` bind.
+choosing another port if that port is already occupied. Its `/api` proxy
+forwards requests to the backend, which uses Uvicorn's default
+`127.0.0.1:8000` bind. Keep the backend running while using API-backed pages;
+resource listing and uploads also require a reachable MongoDB instance.
 
 ## API and routes
 

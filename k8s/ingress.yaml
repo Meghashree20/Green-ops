@@ -1,0 +1,26 @@
+
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: greenops-ingress
+  namespace: greenops
+spec:
+  ingressClassName: nginx
+  rules:
+    - host: greenops.127.0.0.1.nip.io
+      http:
+        paths:
+          - path: /api
+            pathType: Prefix
+            backend:
+              service:
+                name: greenops-backend
+                port:
+                  number: 8000
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: greenops-frontend
+                port:
+                  number: 80

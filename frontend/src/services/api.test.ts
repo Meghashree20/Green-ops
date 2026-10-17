@@ -24,16 +24,14 @@ describe('shared API client', () => {
     fetchMock.mockReset()
   })
 
-  it('requests health at the configured API base URL', async () => {
+  it('requests health at the current origin by default', async () => {
     fetchMock.mockResolvedValue(jsonResponse({ status: 'ok', service: 'greenops-backend' }))
 
     await expect(getHealth()).resolves.toEqual({
       status: 'ok',
       service: 'greenops-backend',
     })
-    expect(fetchMock.mock.calls[0][0]).toBe(
-      'http://127.0.0.1:8000/api/v1/health',
-    )
+    expect(fetchMock.mock.calls[0][0]).toBe(`${window.location.origin}/api/v1/health`)
     expect(fetchMock.mock.calls[0][1]?.method).toBeUndefined()
   })
 
@@ -50,7 +48,7 @@ describe('shared API client', () => {
     })
 
     expect(fetchMock.mock.calls[0][0]).toBe(
-      'http://127.0.0.1:8000/api/v1/resources?page=2&page_size=10&from_dt=2026-10-01T00%3A00%3A00Z&to_dt=2026-10-02T00%3A00%3A00Z',
+      `${window.location.origin}/api/v1/resources?page=2&page_size=10&from_dt=2026-10-01T00%3A00%3A00Z&to_dt=2026-10-02T00%3A00%3A00Z`,
     )
   })
 
@@ -208,7 +206,7 @@ describe('shared API client', () => {
     await uploadResourceCsv(file)
 
     const [url, request] = fetchMock.mock.calls[0]
-    expect(url).toBe('http://127.0.0.1:8000/api/v1/resources/upload-csv')
+    expect(url).toBe(`${window.location.origin}/api/v1/resources/upload-csv`)
     if (!request) throw new Error('Expected a CSV upload request.')
     expect(request?.method).toBe('POST')
     expect(request.body).toBeInstanceOf(FormData)

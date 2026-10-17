@@ -66,9 +66,6 @@ function analyticsResponse(recordCount = 1) {
 describe('GreenOps routes and page behavior', () => {
   beforeEach(() => {
     installApiMock((url) => {
-      if (url.endsWith('/api/v1/health')) {
-        return jsonResponse({ status: 'ok', service: 'greenops-backend' })
-      }
       if (url.includes('/api/v1/resources')) return jsonResponse(emptyResources)
       return jsonResponse({ detail: 'Unexpected request' }, 404)
     })
@@ -81,9 +78,11 @@ describe('GreenOps routes and page behavior', () => {
     ['/cost-carbon', 'Cost & Carbon'],
     ['/recommendations', 'Recommendations'],
   ])('loads %s route', async (path, heading) => {
+    const fetchMock = vi.mocked(fetch)
     renderApp(path)
     expect(await screen.findByRole('heading', { level: 1, name: heading })).toBeVisible()
-    expect(await screen.findByText('API connected')).toBeVisible()
+    expect(screen.queryByText(/API (connected|unavailable)/)).not.toBeInTheDocument()
+    expect(fetchMock.mock.calls.some(([url]) => String(url).endsWith('/api/v1/health'))).toBe(false)
   })
 
   it('opens mobile navigation and closes it after selecting a page', async () => {
@@ -99,14 +98,13 @@ describe('GreenOps routes and page behavior', () => {
     expect(menuButton).toHaveAttribute('aria-expanded', 'false')
   })
 
-  it('shows API health failure rather than reporting a connected state', async () => {
-    installApiMock((url) => {
-      if (url.endsWith('/api/v1/health')) throw new Error('Network unavailable')
-      return jsonResponse(emptyResources)
-    })
+  it('does not poll or display API health in the shared header', async () => {
+    const fetchMock = vi.mocked(fetch)
     renderApp('/analytics')
 
-    expect(await screen.findByText('API unavailable')).toBeVisible()
+    expect(await screen.findByRole('heading', { level: 1, name: 'Analytics' })).toBeVisible()
+    expect(screen.queryByText(/API (connected|unavailable)/)).not.toBeInTheDocument()
+    expect(fetchMock.mock.calls.some(([url]) => String(url).endsWith('/api/v1/health'))).toBe(false)
   })
 
   it('loads stored records for the selected period and displays backend analytics', async () => {
@@ -126,7 +124,7 @@ describe('GreenOps routes and page behavior', () => {
     const fetchMock = vi.mocked(fetch)
     renderApp('/analytics')
     const user = userEvent.setup()
-    await screen.findByText('API connected')
+    await screen.findByRole('heading', { level: 1 })
     fireEvent.change(screen.getByLabelText('From date and time'), {
       target: { value: '2026-10-10T08:30' },
     })
@@ -179,7 +177,7 @@ describe('GreenOps routes and page behavior', () => {
   it('rejects a reversed reporting period before fetching records', async () => {
     const fetchMock = vi.mocked(fetch)
     renderApp('/analytics')
-    await screen.findByText('API connected')
+    await screen.findByRole('heading', { level: 1 })
     fireEvent.change(screen.getByLabelText('From date and time'), {
       target: { value: '2026-10-15T18:45' },
     })
@@ -213,7 +211,7 @@ describe('GreenOps routes and page behavior', () => {
     })
     const user = userEvent.setup()
     renderApp('/analytics')
-    await screen.findByText('API connected')
+    await screen.findByRole('heading', { level: 1 })
     await user.click(screen.getByRole('button', { name: 'Analyze stored records' }))
     await screen.findByText('Network unavailable')
 
@@ -242,7 +240,7 @@ describe('GreenOps routes and page behavior', () => {
     })
     const user = userEvent.setup()
     renderApp('/analytics')
-    await screen.findByText('API connected')
+    await screen.findByRole('heading', { level: 1 })
     await user.click(screen.getByRole('button', { name: 'Analyze stored records' }))
     await screen.findByText('Analysis unavailable.')
 
@@ -272,7 +270,7 @@ describe('GreenOps routes and page behavior', () => {
     const fetchMock = vi.mocked(fetch)
     const user = userEvent.setup()
     renderApp('/analytics')
-    await screen.findByText('API connected')
+    await screen.findByRole('heading', { level: 1 })
     await user.click(screen.getByRole('button', { name: 'Analyze stored records' }))
 
     expect(await screen.findByText('Second page unavailable.')).toBeVisible()
@@ -318,7 +316,7 @@ describe('GreenOps routes and page behavior', () => {
   it('shows cost validation errors without posting invalid rates', async () => {
     const fetchMock = vi.mocked(fetch)
     renderApp('/cost-carbon')
-    await screen.findByText('API connected')
+    await screen.findByRole('heading', { level: 1 })
     fireEvent.change(screen.getByLabelText(/Workload ID/), { target: { value: 'job' } })
     fireEvent.change(screen.getByLabelText(/Workload duration/), { target: { value: '60' } })
     fireEvent.change(screen.getByLabelText(/Instance rate/), { target: { value: '0' } })
@@ -368,7 +366,7 @@ describe('GreenOps routes and page behavior', () => {
     })
     const user = userEvent.setup()
     renderApp('/cost-carbon')
-    await screen.findByText('API connected')
+    await screen.findByRole('heading', { level: 1 })
 
     fireEvent.change(screen.getByLabelText('From date and time'), {
       target: { value: '2026-10-10T08:30' },
@@ -448,7 +446,7 @@ describe('GreenOps routes and page behavior', () => {
     })
     const user = userEvent.setup()
     renderApp('/cost-carbon')
-    await screen.findByText('API connected')
+    await screen.findByRole('heading', { level: 1 })
     fireEvent.change(screen.getByLabelText(/Workload ID/), { target: { value: 'job-a' } })
     fireEvent.change(screen.getByLabelText(/Workload duration/), { target: { value: '3600' } })
     fireEvent.change(screen.getByLabelText(/Instance rate/), { target: { value: '1' } })
@@ -494,7 +492,7 @@ describe('GreenOps routes and page behavior', () => {
   it('shows an empty stored-record state when the selected period has no matches', async () => {
     const user = userEvent.setup()
     renderApp('/cost-carbon')
-    await screen.findByText('API connected')
+    await screen.findByRole('heading', { level: 1 })
     await user.click(screen.getByRole('button', { name: 'Load stored records' }))
 
     expect(await screen.findByText(/No stored records match this period/)).toBeVisible()
@@ -523,7 +521,7 @@ describe('GreenOps routes and page behavior', () => {
       return jsonResponse({ detail: 'Unexpected request' }, 404)
     })
     renderApp('/cost-carbon')
-    await screen.findByText('API connected')
+    await screen.findByRole('heading', { level: 1 })
     await user.click(screen.getByRole('button', { name: 'Load stored records' }))
     expect(await screen.findByText('Storage unavailable.')).toBeVisible()
 
@@ -578,7 +576,7 @@ describe('GreenOps routes and page behavior', () => {
     })
     const user = userEvent.setup()
     renderApp('/recommendations')
-    await screen.findByText('API connected')
+    await screen.findByRole('heading', { level: 1 })
     fireEvent.change(screen.getByLabelText('From date and time'), {
       target: { value: '2026-10-10T08:30' },
     })
@@ -620,7 +618,7 @@ describe('GreenOps routes and page behavior', () => {
     const fetchMock = vi.mocked(fetch)
     const user = userEvent.setup()
     renderApp('/recommendations')
-    await screen.findByText('API connected')
+    await screen.findByRole('heading', { level: 1 })
     await user.click(screen.getByRole('button', { name: 'Load workload history' }))
 
     expect(await screen.findByText(/No stored records match this reporting period/)).toBeVisible()
@@ -654,7 +652,7 @@ describe('GreenOps routes and page behavior', () => {
     })
     const user = userEvent.setup()
     renderApp('/recommendations')
-    await screen.findByText('API connected')
+    await screen.findByRole('heading', { level: 1 })
     await user.click(screen.getByRole('button', { name: 'Load workload history' }))
     expect(await screen.findByText('Storage unavailable.')).toBeVisible()
 
@@ -707,7 +705,7 @@ describe('GreenOps routes and page behavior', () => {
     })
     const user = userEvent.setup()
     renderApp('/recommendations')
-    await screen.findByText('API connected')
+    await screen.findByRole('heading', { level: 1 })
     await user.click(screen.getByRole('button', { name: 'Load workload history' }))
     await user.selectOptions(await screen.findByLabelText(/Workload ID/), 'job-a')
     await user.click(screen.getByRole('button', { name: 'Evaluate workload' }))
@@ -746,7 +744,7 @@ describe('GreenOps routes and page behavior', () => {
     })
     const user = userEvent.setup()
     renderApp('/recommendations')
-    await screen.findByText('API connected')
+    await screen.findByRole('heading', { level: 1 })
     await user.click(screen.getByRole('button', { name: 'Load workload history' }))
 
     expect(await screen.findByText('Second page unavailable.')).toBeVisible()
@@ -760,7 +758,7 @@ describe('GreenOps routes and page behavior', () => {
     const fetchMock = vi.mocked(fetch)
     const user = userEvent.setup()
     renderApp('/recommendations')
-    await screen.findByText('API connected')
+    await screen.findByRole('heading', { level: 1 })
     fireEvent.change(screen.getByLabelText('From date and time'), {
       target: { value: '2026-10-16T08:30' },
     })

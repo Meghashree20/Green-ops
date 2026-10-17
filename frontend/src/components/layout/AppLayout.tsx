@@ -1,5 +1,4 @@
 import {
-  Activity,
   BarChart3,
   Cloud,
   Coins,
@@ -12,12 +11,6 @@ import {
 } from 'lucide-react'
 import { useEffect, useState } from 'react'
 import { NavLink, Outlet, useLocation } from 'react-router-dom'
-import { getHealth } from '../../services/api'
-
-type ApiHealth =
-  | { state: 'checking' }
-  | { state: 'connected'; service: string }
-  | { state: 'unavailable'; message: string }
 
 const navigation = [
   { label: 'Overview', to: '/overview', icon: LayoutDashboard },
@@ -29,8 +22,6 @@ const navigation = [
 
 export function AppLayout() {
   const [openMenuPath, setOpenMenuPath] = useState<string | null>(null)
-  const [apiHealth, setApiHealth] = useState<ApiHealth>({ state: 'checking' })
-  const [healthRetry, setHealthRetry] = useState(0)
   const location = useLocation()
   const menuOpen = openMenuPath === location.pathname
   const currentPage =
@@ -44,36 +35,6 @@ export function AppLayout() {
     window.addEventListener('keydown', closeOnEscape)
     return () => window.removeEventListener('keydown', closeOnEscape)
   }, [menuOpen])
-
-  useEffect(() => {
-    const controller = new AbortController()
-    getHealth(controller.signal)
-      .then((health) => {
-        if (controller.signal.aborted) return
-        if (health.status === 'ok') {
-          setApiHealth({ state: 'connected', service: health.service })
-        } else {
-          setApiHealth({
-            state: 'unavailable',
-            message: `Health endpoint returned status "${health.status}".`,
-          })
-        }
-      })
-      .catch((error: unknown) => {
-        if (!controller.signal.aborted) {
-          setApiHealth({
-            state: 'unavailable',
-            message: error instanceof Error ? error.message : 'API health check failed.',
-          })
-        }
-      })
-    return () => controller.abort()
-  }, [healthRetry])
-
-  const retryHealth = () => {
-    setApiHealth({ state: 'checking' })
-    setHealthRetry((current) => current + 1)
-  }
 
   return (
     <div className="min-h-screen bg-[var(--color-canvas)] text-[var(--color-ink)]">
@@ -166,41 +127,6 @@ export function AppLayout() {
                 {currentPage}
               </h1>
             </div>
-          </div>
-          <div className="flex shrink-0 items-center gap-2.5">
-            {apiHealth.state === 'checking' ? (
-              <span className="flex items-center gap-2 rounded-full border border-slate-200 bg-slate-50 px-3 py-1.5 text-xs font-medium text-slate-600" role="status" aria-live="polite">
-                <span className="size-1.5 animate-pulse rounded-full bg-slate-400" aria-hidden="true" />
-                Checking API…
-              </span>
-            ) : apiHealth.state === 'connected' ? (
-              <span
-                className="flex items-center gap-2 rounded-full border border-emerald-200 bg-emerald-50 px-3 py-1.5 text-xs font-medium text-emerald-900"
-                title={`Connected to ${apiHealth.service}`}
-                role="status"
-                aria-live="polite"
-              >
-                <span className="size-1.5 rounded-full bg-emerald-600" aria-hidden="true" />
-                API connected
-              </span>
-            ) : (
-              <div className="flex items-center gap-2" role="status" aria-live="polite">
-                <span
-                  className="flex items-center gap-2 rounded-full border border-rose-200 bg-rose-50 px-3 py-1.5 text-xs font-medium text-rose-900"
-                  title={apiHealth.message}
-                >
-                  <Activity size={13} aria-hidden="true" />
-                  API unavailable
-                </span>
-                <button
-                  type="button"
-                  onClick={retryHealth}
-                  className="rounded-md px-2 py-1.5 text-xs font-semibold text-emerald-800 hover:bg-emerald-50 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-emerald-700"
-                >
-                  Retry
-                </button>
-              </div>
-            )}
           </div>
         </header>
 
